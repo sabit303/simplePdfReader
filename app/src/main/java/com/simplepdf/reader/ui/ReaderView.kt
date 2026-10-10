@@ -17,6 +17,7 @@ class ReaderView(
     private val onPageChanged: (Int) -> Unit,
     onScrollDirection: (Boolean) -> Unit,
     private val onPageTap: () -> Unit,
+    private val onControlsInteraction: (Boolean) -> Unit,
     onRetry: () -> Unit,
 ) : FrameLayout(context) {
     private val engine = PdfEngine()
@@ -30,7 +31,7 @@ class ReaderView(
         setOnClickListener { onPageTap() }
     }
     private var barsVisible = true
-    private val flag = PageFlag(context, viewport::scrollToProgress, ::jumpTo, ::showJumpDialog)
+    private val flag = PageFlag(context, viewport::scrollToProgress, ::jumpTo, ::showJumpDialog, onControlsInteraction)
     private var pageCount = 0
     private var pageIndex = -1
     private var ready = false
@@ -55,7 +56,7 @@ class ReaderView(
             bottomMargin = context.dp(80)
         })
         addView(topBar, LayoutParams(LayoutParams.MATCH_PARENT, context.dp(48), Gravity.TOP))
-        addView(flag, LayoutParams(context.dp(48), context.dp(48), Gravity.RIGHT or Gravity.TOP))
+        addView(flag, LayoutParams(context.dp(56), context.dp(48), Gravity.RIGHT or Gravity.TOP))
         addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> flag.updatePosition() }
         flag.visibility = GONE
         engine.open(tab.document.path) { result ->
@@ -64,7 +65,7 @@ class ReaderView(
                     pageCount = sizes.size
                     flag.pageCount = pageCount
                     ready = true
-                    flag.visibility = VISIBLE
+                    setFlagVisible(barsVisible, animate = false)
                     errorPanel.visibility = GONE
                     viewport.setDocument(sizes, tab.pageIndex)
                 },
@@ -85,6 +86,7 @@ class ReaderView(
 
     fun setBarsVisible(visible: Boolean, animate: Boolean) {
         barsVisible = visible
+        setFlagVisible(visible, animate)
         topBar.animate().cancel()
         if (visible) topBar.visibility = VISIBLE
         val offset = if (visible) 0f else -context.dp(48).toFloat()
@@ -98,11 +100,26 @@ class ReaderView(
         }
     }
 
+    private fun setFlagVisible(visible: Boolean, animate: Boolean) {
+        flag.animate().cancel()
+        val show = visible && ready
+        if (show) flag.visibility = VISIBLE
+        val offset = if (show) 0f else context.dp(56).toFloat()
+        if (animate && ready) {
+            flag.animate().translationX(offset).alpha(if (show) 1f else 0f).setDuration(180)
+                .withEndAction { if (!barsVisible) flag.visibility = INVISIBLE }.start()
+        } else {
+            flag.translationX = offset
+            flag.alpha = if (show) 1f else 0f
+            flag.visibility = if (!ready) GONE else if (show) VISIBLE else INVISIBLE
+        }
+    }
+
     fun jumpTo(index: Int) {
         check(ready) { "Page navigation requested before the PDF was ready." }
         require(index in 0 until pageCount)
         viewport.jumpTo(index)
-        onPageTap()
+        onControlsInteraction(false)
     }
 
     private fun showJumpDialog() {
@@ -121,6 +138,7 @@ class ReaderView(
             .setPositiveButton(R.string.jump, null)
             .create()
         dialog.setOnShowListener {
+            onControlsInteraction(true)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val page = input.text.toString().toIntOrNull()
                 if (page == null || page !in 1..pageCount) {
@@ -133,11 +151,13 @@ class ReaderView(
             input.requestFocus()
             dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
         }
+        dialog.setOnDismissListener { onControlsInteraction(false) }
         dialog.show()
     }
 
     fun dispose() {
         topBar.animate().cancel()
+        flag.animate().cancel()
         viewport.dispose()
         engine.close()
     }

@@ -323,9 +323,13 @@ class MainActivity : Activity() {
                     if (stopped) saveSession() else main.postDelayed(persist, 200)
                 }
             }, { scrollingDown ->
-                main.removeCallbacks(hideTabs)
-                setTabsVisible(!scrollingDown)
-            }, ::showTabsTemporarily, ::showSelectedTab)
+                if (scrollingDown) {
+                    main.removeCallbacks(hideTabs)
+                    setTabsVisible(false)
+                } else {
+                    showTabsTemporarily()
+                }
+            }, ::toggleReaderControls, ::onControlsInteraction, ::showSelectedTab)
             content.addView(reader, FrameLayout.LayoutParams(-1, -1))
         }
         rebuildTabs()
@@ -377,6 +381,24 @@ class MainActivity : Activity() {
         main.removeCallbacks(hideTabs)
         setTabsVisible(true)
         if (session.selectedPath != null) main.postDelayed(hideTabs, 3500)
+    }
+
+    private fun toggleReaderControls() {
+        if (tabsVisible) {
+            main.removeCallbacks(hideTabs)
+            setTabsVisible(false)
+        } else {
+            showTabsTemporarily()
+        }
+    }
+
+    private fun onControlsInteraction(active: Boolean) {
+        if (active) {
+            main.removeCallbacks(hideTabs)
+            setTabsVisible(true)
+        } else {
+            showTabsTemporarily()
+        }
     }
 
     private fun setTabsVisible(visible: Boolean, animate: Boolean = true) {

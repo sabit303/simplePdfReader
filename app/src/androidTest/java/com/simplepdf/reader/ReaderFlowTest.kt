@@ -102,7 +102,7 @@ class ReaderFlowTest {
     }
 
     @Test
-    fun barsHideTogetherWithoutResizingOrMovingThePdf() {
+    fun allControlsAutoHideAndToggleOnPageTapWithoutMovingThePdf() {
         launch()
         awaitPage(1, 3)
         var viewportHeight = 0
@@ -111,16 +111,14 @@ class ReaderFlowTest {
             val topBar = activity.findViewById<android.widget.TextView>(R.id.reader_top_bar)
             assertEquals(second.title, topBar.text.toString())
             assertEquals(View.VISIBLE, topBar.visibility)
+            assertEquals(View.VISIBLE, activity.views().filterIsInstance<PageFlag>().single().visibility)
             val reader = activity.views().filterIsInstance<ReaderView>().single()
             assertTrue(reader.views().filterIsInstance<Button>().none { it.isShown })
             val viewport = activity.views().filterIsInstance<PdfViewport>().single()
             viewportHeight = viewport.height
             scrollPosition = viewport.scrollPosition
         }
-        awaitCondition {
-            it.findViewById<View>(R.id.tab_bar).visibility == View.INVISIBLE &&
-                it.findViewById<View>(R.id.reader_top_bar).visibility == View.INVISIBLE
-        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
         onActivity { activity ->
             val viewport = activity.views().filterIsInstance<PdfViewport>().single()
             assertEquals(viewportHeight, viewport.height)
@@ -133,46 +131,48 @@ class ReaderFlowTest {
         onActivity { activity ->
             assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.tab_bar).visibility)
             assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.reader_top_bar).visibility)
+            assertEquals(View.VISIBLE, activity.views().filterIsInstance<PageFlag>().single().visibility)
             assertEquals(viewportHeight, activity.views().filterIsInstance<PdfViewport>().single().height)
             assertTrue(activity.views().filterIsInstance<android.widget.TextView>().none { it.text == "..." })
             assertTrue(activity.findViewById<View>(R.id.tab_bar).width < activity.window.decorView.width * 0.9f)
         }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity { it.views().filterIsInstance<PdfViewport>().single().performClick() }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+        onActivity { it.views().filterIsInstance<PdfViewport>().single().performClick() }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
     @Test
-    fun scrollDirectionControlsBothBars() {
+    fun scrollDirectionControlsBarsAndFlag() {
         launch()
         awaitPage(1, 3)
         onActivity { activity ->
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true)
         }
-        awaitCondition {
-            it.findViewById<View>(R.id.tab_bar).visibility == View.INVISIBLE &&
-                it.findViewById<View>(R.id.reader_top_bar).visibility == View.INVISIBLE
-        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
         onActivity { activity ->
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false)
         }
-        awaitCondition {
-            it.findViewById<View>(R.id.tab_bar).visibility == View.VISIBLE &&
-                it.findViewById<View>(R.id.reader_top_bar).visibility == View.VISIBLE
-        }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
     @Test
-    fun compactFlagRetainsTouchTargetAndPageJump() {
+    fun restoredFlagRetainsPageJumpAndStaysVisibleWhileDialogIsOpen() {
         launch()
         awaitPage(1, 3)
         onActivity { activity ->
             val flag = activity.views().filterIsInstance<PageFlag>().single()
             val density = activity.resources.displayMetrics.density
-            assertEquals((48 * density).toInt(), flag.width)
+            assertEquals((56 * density).toInt(), flag.width)
             assertEquals((48 * density).toInt(), flag.height)
             val bitmap = Bitmap.createBitmap(flag.width, flag.height, Bitmap.Config.ARGB_8888)
             try {
                 flag.draw(Canvas(bitmap))
-                assertEquals(0, Color.alpha(bitmap.getPixel((4 * density).toInt(), flag.height / 2)))
-                assertEquals(0, Color.alpha(bitmap.getPixel(flag.width / 2, (4 * density).toInt())))
+                assertEquals(255, Color.alpha(bitmap.getPixel((4 * density).toInt(), flag.height / 2)))
+                assertEquals(255, Color.alpha(bitmap.getPixel(flag.width / 2, (4 * density).toInt())))
                 assertEquals(255, Color.alpha(bitmap.getPixel(flag.width - 1, flag.height / 2)))
             } finally {
                 bitmap.recycle()
@@ -184,7 +184,55 @@ class ReaderFlowTest {
         val root = instrumentation.uiAutomation.rootInActiveWindow
         assertNotNull(root)
         assertTrue(root.findAccessibilityNodeInfosByText(context.getString(R.string.jump_title)).isNotEmpty())
+        Thread.sleep(4000)
+        onActivity { assertTrue(it.controlsHaveVisibility(View.VISIBLE)) }
         instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+    }
+
+    @Test
+    fun flagTouchPausesAutoHideUntilReleased() {
+        launch()
+        awaitPage(1, 3)
+        val downTime = SystemClock.uptimeMillis()
+        onActivity { activity ->
+            val flag = activity.views().filterIsInstance<PageFlag>().single()
+            val event = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN,
+                flag.width / 2f, flag.height / 2f, 0)
+            try {
+                flag.dispatchTouchEvent(event)
+            } finally {
+                event.recycle()
+            }
+        }
+        Thread.sleep(4000)
+        onActivity { activity ->
+            assertTrue(activity.controlsHaveVisibility(View.VISIBLE))
+            val flag = activity.views().filterIsInstance<PageFlag>().single()
+            val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL,
+                flag.width / 2f, flag.height / 2f, 0)
+            try {
+                flag.dispatchTouchEvent(event)
+            } finally {
+                event.recycle()
+            }
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+    }
+
+    @Test
+    fun rapidPageTapsKeepAllControlAnimationsInSync() {
+        launch()
+        awaitPage(1, 3)
+        onActivity { activity ->
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            repeat(4) { viewport.performClick() }
+        }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity { activity ->
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            repeat(3) { viewport.performClick() }
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
     @Test
@@ -234,6 +282,14 @@ class ReaderFlowTest {
 
     private fun onActivity(block: (MainActivity) -> Unit) {
         scenario!!.onActivity(block)
+    }
+
+    private fun MainActivity.controlsHaveVisibility(visibility: Int): Boolean {
+        val controls = listOf(findViewById<View>(R.id.tab_bar), findViewById<View>(R.id.reader_top_bar),
+            views().filterIsInstance<PageFlag>().single())
+        return controls.all {
+            it.visibility == visibility && it.alpha == if (visibility == View.VISIBLE) 1f else 0f
+        }
     }
 
     private fun awaitPage(page: Int, count: Int) {

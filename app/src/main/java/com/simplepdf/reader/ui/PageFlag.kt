@@ -5,7 +5,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.InsetDrawable
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.View
@@ -20,6 +19,7 @@ class PageFlag(
     private val onProgress: (Float) -> Unit,
     private val onPage: (Int) -> Unit,
     private val onJump: () -> Unit,
+    private val onInteraction: (Boolean) -> Unit,
 ) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
@@ -33,13 +33,11 @@ class PageFlag(
         private set
 
     init {
-        val radius = context.dp(8).toFloat()
-        val shape = GradientDrawable().apply {
+        val radius = context.dp(12).toFloat()
+        background = GradientDrawable().apply {
             setColor(Palette.green)
             cornerRadii = floatArrayOf(radius, radius, 0f, 0f, 0f, 0f, radius, radius)
         }
-        // Keep a 48dp touch target around the smaller 40 x 32dp flag.
-        background = InsetDrawable(shape, context.dp(8), context.dp(8), 0, context.dp(8))
         elevation = context.dp(3).toFloat()
         isFocusable = true
         isClickable = true
@@ -63,18 +61,19 @@ class PageFlag(
     override fun onDraw(canvas: Canvas) {
         paint.color = Color.WHITE
         paint.textAlign = Paint.Align.CENTER
-        paint.textSize = 12 * resources.displayMetrics.scaledDensity
+        paint.textSize = 13 * resources.displayMetrics.scaledDensity
         val text = (pageIndex + 1).toString()
         val availableWidth = (width - context.dp(16)).coerceAtLeast(1)
         val textWidth = paint.measureText(text)
         if (textWidth > availableWidth) paint.textSize *= availableWidth / textWidth
         val textY = height / 2f - (paint.ascent() + paint.descent()) / 2f
-        val x = (width + context.dp(8)) / 2f
+        val x = width / 2f
         canvas.drawText(text, x, textY, paint)
         paint.alpha = 120
-        paint.strokeWidth = context.dp(1).toFloat()
-        val grip = context.dp(4)
-        canvas.drawLine(x - grip, height - context.dp(12).toFloat(), x + grip, height - context.dp(12).toFloat(), paint)
+        paint.strokeWidth = context.dp(2).toFloat()
+        val grip = context.dp(6)
+        canvas.drawLine(x - grip, context.dp(7).toFloat(), x + grip, context.dp(7).toFloat(), paint)
+        canvas.drawLine(x - grip, height - context.dp(7).toFloat(), x + grip, height - context.dp(7).toFloat(), paint)
         paint.alpha = 255
     }
 
@@ -85,12 +84,14 @@ class PageFlag(
                 downProgress = progress
                 dragging = false
                 parent.requestDisallowInterceptTouchEvent(true)
+                onInteraction(true)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (abs(event.rawY - downY) > slop) dragging = true
                 if (dragging) onProgress((downProgress + (event.rawY - downY) / travel.coerceAtLeast(1f)).coerceIn(0f, 1f))
             }
             MotionEvent.ACTION_UP -> {
+                onInteraction(false)
                 if (!dragging) performClick()
                 dragging = false
                 parent.requestDisallowInterceptTouchEvent(false)
@@ -98,6 +99,7 @@ class PageFlag(
             MotionEvent.ACTION_CANCEL -> {
                 dragging = false
                 parent.requestDisallowInterceptTouchEvent(false)
+                onInteraction(false)
             }
         }
         return true

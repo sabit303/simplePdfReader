@@ -1,6 +1,8 @@
 <resources>
     <item name="tab_bar" type="id" />
     <item name="reader_top_bar" type="id" />
+    <item name="library_list" type="id" />
+    <item name="library_search" type="id" />
     <item name="zoom_in" type="id" />
     <item name="zoom_out" type="id" />
 </resources>

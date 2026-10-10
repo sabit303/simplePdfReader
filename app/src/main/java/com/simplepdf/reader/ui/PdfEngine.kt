@@ -8,18 +8,16 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import java.io.File
 import java.io.IOException
-import java.util.concurrent.Executors
-import java.util.concurrent.Future
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
 
-internal class PdfEngine {
-    private val worker = Executors.newSingleThreadExecutor()
+internal class PdfEngine(private val worker: ExecutorService) : PdfBackend {
     private val main = Handler(Looper.getMainLooper())
     private val closed = AtomicBoolean(false)
     private var renderer: PdfRenderer? = null
     private var pageSizes: List<PdfPageSize> = emptyList()
 
-    fun open(path: String, callback: (Result<List<PdfPageSize>>) -> Unit) {
+    override fun open(path: String, callback: (Result<List<PdfPageSize>>) -> Unit) {
         worker.execute {
             if (closed.get()) return@execute
             val result = pdfResult {
@@ -42,9 +40,9 @@ internal class PdfEngine {
         }
     }
 
-    fun render(index: Int, requestedWidth: Int, callback: (Result<Bitmap>) -> Unit): Future<*> =
-        worker.submit {
-            if (closed.get() || Thread.currentThread().isInterrupted) return@submit
+    override fun render(index: Int, requestedWidth: Int, callback: (Result<Bitmap>) -> Unit) {
+        worker.execute {
+            if (closed.get() || Thread.currentThread().isInterrupted) return@execute
             val result = pdfResult {
                 checkNotNull(renderer).openPage(index).use { page ->
                     val size = pageSizes[index]
@@ -67,15 +65,15 @@ internal class PdfEngine {
                 else result.getOrNull()?.recycle()
             }
         }
+    }
 
-    fun close() {
+    override fun close() {
         if (closed.compareAndSet(false, true)) {
             worker.execute {
                 renderer?.close()
                 renderer = null
                 pageSizes = emptyList()
             }
-            worker.shutdown()
         }
     }
 

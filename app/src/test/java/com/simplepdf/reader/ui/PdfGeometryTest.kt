@@ -74,4 +74,49 @@ class PdfGeometryTest {
         assertEquals(2560, PdfPageSize(600, 400).renderWidth(9000))
         assertEquals(400, PdfPageSize(400, 600).renderWidth(400))
     }
+
+    @Test
+    fun readingPositionSurvivesTabRecreationAndOrientationChanges() {
+        val pages = List(8) { PdfPageSize(400, 600) }
+        val portrait = PdfGeometry(pages, 420f, 10f, 12f)
+        val landscape = PdfGeometry(pages, 840f, 10f, 12f)
+        val expected = PdfReadingPosition(3, 0.35f, 2.5f, 0.65f)
+        val transform = PdfTransform()
+        transform.restore(portrait, 800f, expected)
+        val saved = transform.capture(portrait)
+        val recreated = PdfTransform()
+        recreated.restore(landscape, 400f, saved)
+        val rotated = recreated.capture(landscape)
+        assertEquals(expected.pageIndex, rotated.pageIndex)
+        assertEquals(expected.pageOffset, rotated.pageOffset, 0.0001f)
+        assertEquals(expected.zoom, rotated.zoom, 0f)
+        assertEquals(expected.horizontalOffset, rotated.horizontalOffset, 0.0001f)
+        recreated.restore(portrait, 800f, rotated)
+        assertEquals(transform.x, recreated.x, 0.01f)
+        assertEquals(transform.y, recreated.y, 0.01f)
+    }
+
+    @Test
+    fun readingPositionPreservesTopMarginAndInterPageGap() {
+        val layout = PdfGeometry(List(3) { PdfPageSize(400, 600) }, 420f, 10f, 12f)
+        val transform = PdfTransform()
+        transform.setBounds(420f, 400f, layout.totalHeight)
+        for (y in listOf(0f, 615f)) {
+            transform.moveTo(0f, y)
+            val saved = transform.capture(layout)
+            val recreated = PdfTransform()
+            recreated.restore(layout, 400f, saved)
+            assertEquals(y, recreated.y, 0.01f)
+        }
+    }
+
+    @Test
+    fun changedDocumentClampsSavedPageAndPanToAvailableBounds() {
+        val layout = PdfGeometry(listOf(PdfPageSize(400, 600)), 420f, 10f, 12f)
+        val transform = PdfTransform()
+        transform.restore(layout, 800f, PdfReadingPosition(100, 0.8f, 1f, 0.9f))
+        assertEquals(0, transform.capture(layout).pageIndex)
+        assertEquals(0f, transform.x, 0f)
+        assertEquals(0f, transform.y, 0f)
+    }
 }

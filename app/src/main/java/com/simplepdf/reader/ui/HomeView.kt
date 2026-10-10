@@ -1,6 +1,8 @@
 package com.simplepdf.reader.ui
 
 import android.content.Context
+import android.os.Bundle
+import android.os.Parcelable
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.format.Formatter
@@ -8,6 +10,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -22,12 +25,12 @@ class HomeView(
     onRefresh: () -> Unit,
     onGrantAccess: () -> Unit,
     private val onOpen: (PdfDocument) -> Unit,
-) : LinearLayout(context) {
+) : FrameLayout(context) {
     private val count = context.label("", 12f, true)
     private val status = context.label("", 14f)
     private val empty = context.label("", 16f).apply { gravity = Gravity.CENTER }
     private val permission = LinearLayout(context).apply {
-        orientation = VERTICAL
+        orientation = LinearLayout.VERTICAL
         setPadding(context.dp(20), context.dp(20), context.dp(20), context.dp(20))
         background = rounded(Palette.softGreen, context.dp(20).toFloat())
         addView(context.label(context.getString(R.string.storage_title), 19f, true))
@@ -37,33 +40,40 @@ class HomeView(
         addView(context.action(context.getString(R.string.allow_access), onGrantAccess))
     }
     private val adapter = LibraryAdapter()
+    private val header = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        layoutParams = RecyclerView.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+    }
+    private val search = EditText(context)
+    private val list = RecyclerView(context)
     private var documents: List<PdfDocument> = emptyList()
     private var query = ""
     private var busy = false
     private var hasAccess = false
+    private var pendingScrollState: Parcelable? = null
 
     init {
-        orientation = VERTICAL
-        setPadding(context.dp(20), context.dp(12), context.dp(20), 0)
         setBackgroundColor(Palette.background)
-        addView(context.label(context.getString(R.string.app_name), 13f, true).apply {
+        header.addView(context.label(context.getString(R.string.app_name), 13f, true).apply {
             setTextColor(Palette.green)
         })
-        addView(context.label(context.getString(R.string.library), 32f, true).apply {
+        header.addView(context.label(context.getString(R.string.library), 32f, true).apply {
             setPadding(0, context.dp(8), 0, 0)
         })
-        addView(context.label(context.getString(R.string.library_subtitle)).apply {
+        header.addView(context.label(context.getString(R.string.library_subtitle)).apply {
             setTextColor(Palette.muted)
             setPadding(0, context.dp(4), 0, context.dp(18))
         })
-        addView(LinearLayout(context).apply {
+        header.addView(LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(context.action(context.getString(R.string.open_pdf), onOpenPicker),
-                LayoutParams(0, context.dp(48), 1f))
+                LinearLayout.LayoutParams(0, context.dp(48), 1f))
             addView(context.action(context.getString(R.string.refresh), onRefresh),
-                LayoutParams(0, context.dp(48), 1f).apply { marginStart = context.dp(10) })
+                LinearLayout.LayoutParams(0, context.dp(48), 1f).apply { marginStart = context.dp(10) })
         })
-        addView(EditText(context).apply {
+        header.addView(search.apply {
+            id = R.id.library_search
+            isSaveEnabled = false
             hint = context.getString(R.string.search_hint)
             textSize = 16f
             isSingleLine = true
@@ -79,50 +89,57 @@ class HomeView(
                 }
                 override fun afterTextChanged(s: Editable?) = Unit
             })
-        }, LayoutParams(LayoutParams.MATCH_PARENT, context.dp(52)).apply {
+        }, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, context.dp(52)).apply {
             topMargin = context.dp(18)
             bottomMargin = context.dp(14)
         })
-        addView(permission, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        addView(LinearLayout(context).apply {
+        header.addView(permission, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        header.addView(LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(context.label(context.getString(R.string.sort_label), 10f, true).apply {
                 setTextColor(Palette.muted)
                 letterSpacing = 0.08f
-            }, LayoutParams(0, context.dp(40), 1f))
+            }, LinearLayout.LayoutParams(0, context.dp(40), 1f))
             addView(count)
         })
-        addView(status)
-        addView(empty, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+        header.addView(status)
+        header.addView(empty, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
             topMargin = context.dp(12)
         })
-        addView(RecyclerView(context).apply {
+        addView(list.apply {
+            id = R.id.library_list
+            isSaveEnabled = false
             layoutManager = LinearLayoutManager(context)
             adapter = this@HomeView.adapter
+            itemAnimator = null
             clipToPadding = false
-            setPadding(0, 0, 0, context.dp(100))
-        }, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+            setPadding(context.dp(20), context.dp(12), context.dp(20), context.dp(100))
+        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
 
-    fun setAccess(granted: Boolean) {
-        hasAccess = granted
-        permission.visibility = if (granted) GONE else VISIBLE
-        filter()
-    }
-
-    fun showLoading() {
-        busy = true
-        status.text = context.getString(R.string.scanning)
-        status.visibility = VISIBLE
-        filter()
-    }
-
-    fun showDocuments(items: List<PdfDocument>, warning: String? = null) {
-        busy = false
+    fun showLibrary(items: List<PdfDocument>, access: Boolean, loading: Boolean, warning: String?) {
         documents = items
-        status.text = warning.orEmpty()
-        status.visibility = if (warning == null) GONE else VISIBLE
+        hasAccess = access
+        busy = loading
+        permission.visibility = if (access) GONE else VISIBLE
+        status.text = if (loading) context.getString(R.string.scanning) else warning.orEmpty()
+        status.visibility = if (loading || warning != null) VISIBLE else GONE
         filter()
+        if (!loading || items.isNotEmpty()) {
+            pendingScrollState?.let { list.layoutManager?.onRestoreInstanceState(it) }
+            pendingScrollState = null
+        }
+    }
+
+    fun saveState(state: Bundle) {
+        state.putString("library.query", query)
+        state.putParcelable("library.scroll", pendingScrollState ?: list.layoutManager?.onSaveInstanceState())
+    }
+
+    @Suppress("DEPRECATION")
+    fun restoreState(state: Bundle?) {
+        search.setText(state?.getString("library.query").orEmpty())
+        pendingScrollState = state?.getParcelable("library.scroll")
     }
 
     private fun filter() {
@@ -138,12 +155,15 @@ class HomeView(
         empty.visibility = if (filtered.isEmpty() && !busy && hasAccess) VISIBLE else GONE
     }
 
-    private inner class LibraryAdapter : RecyclerView.Adapter<LibraryHolder>() {
+    private inner class LibraryAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         var items: List<PdfDocument> = emptyList()
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): LibraryHolder {
+        override fun getItemViewType(position: Int): Int = if (position == 0) 0 else 1
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == 0) return object : RecyclerView.ViewHolder(header) {}
             val row = LinearLayout(context).apply {
-                orientation = HORIZONTAL
+                orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(context.dp(14), context.dp(14), context.dp(14), context.dp(14))
                 background = rounded(android.graphics.Color.WHITE, context.dp(16).toFloat())
@@ -156,9 +176,9 @@ class HomeView(
                 gravity = Gravity.CENTER
                 setTextColor(Palette.green)
                 background = rounded(Palette.softGreen, context.dp(10).toFloat())
-            }, LayoutParams(context.dp(44), context.dp(54)))
+            }, LinearLayout.LayoutParams(context.dp(44), context.dp(54)))
             val body = LinearLayout(context).apply {
-                orientation = VERTICAL
+                orientation = LinearLayout.VERTICAL
                 setPadding(context.dp(14), 0, 0, 0)
             }
             val title = context.label("", 16f, true).apply {
@@ -172,14 +192,15 @@ class HomeView(
             }
             body.addView(title)
             body.addView(details)
-            row.addView(body, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(body, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
             return LibraryHolder(row, title, details)
         }
 
-        override fun getItemCount(): Int = items.size
+        override fun getItemCount(): Int = items.size + 1
 
-        override fun onBindViewHolder(holder: LibraryHolder, position: Int) {
-            val document = items[position]
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            if (holder !is LibraryHolder) return
+            val document = items[position - 1]
             holder.title.text = document.title
             val modified = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
                 .format(Date(document.modifiedAt))

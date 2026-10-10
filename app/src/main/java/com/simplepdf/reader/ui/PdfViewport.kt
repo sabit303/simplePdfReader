@@ -2,14 +2,11 @@ package com.simplepdf.reader.ui
 
 import android.animation.ValueAnimator
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.os.Bundle
-import android.util.Log
-import android.util.LruCache
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -22,7 +19,7 @@ import kotlin.math.sqrt
 
 internal class PdfViewport(
     context: Context,
-    private val engine: PdfEngine,
+    internal val document: PdfDocumentState,
     private val onPosition: (Int, Float) -> Unit,
     private val onScrollStateChanged: (Boolean) -> Unit,
     private val onScrollDirection: (Boolean) -> Unit,
@@ -31,13 +28,12 @@ internal class PdfViewport(
     private val transform = PdfTransform()
     private var geometry: PdfGeometry? = null
     private var sizes: List<PdfPageSize> = emptyList()
-    private var initialPage = 0
+    private var pageKeys: List<PdfPageKey> = emptyList()
     private var disposed = false
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val pageRect = RectF()
     private val scroller = OverScroller(context)
     private var zoomAnimation: ValueAnimator? = null
-    private var rendering = false
     private var pendingRequest = false
     private var pinching = false
     private var multiplePointers = false
@@ -45,14 +41,10 @@ internal class PdfViewport(
     private var scrolling = false
     private var scrollingDown: Boolean? = null
     private var announcedPage = -1
-    private val failedPages = mutableSetOf<Int>()
-    private val cache = object : LruCache<Int, Bitmap>(
-        (Runtime.getRuntime().maxMemory() / 8).coerceIn(16L * 1024 * 1024, 48L * 1024 * 1024).toInt(),
-    ) {
-        override fun sizeOf(key: Int, value: Bitmap): Int = value.allocationByteCount
-    }
+    private val failedPages get() = document.failedPages
+    private val cache get() = document.cache
     val zoom: Float get() = transform.scale
-    val currentPage: Int get() = geometry?.pageAt(transform.y / transform.scale) ?: initialPage
+    val currentPage: Int get() = geometry?.pageAt(transform.y / transform.scale) ?: document.position.pageIndex
     val scrollPosition: Float get() = transform.y
     val isFlinging: Boolean get() = !scroller.isFinished
 
@@ -122,10 +114,10 @@ internal class PdfViewport(
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
     }
 
-    fun setDocument(pages: List<PdfPageSize>, pageIndex: Int) {
+    fun setDocument(pages: List<PdfPageSize>) {
         require(pages.isNotEmpty())
         sizes = pages
-        initialPage = pageIndex.coerceIn(pages.indices)
+        pageKeys = pages.indices.map { PdfPageKey(document.path, it) }
         rebuildGeometry()
     }
 
@@ -137,14 +129,9 @@ internal class PdfViewport(
 
     private fun rebuildGeometry() {
         if (sizes.isEmpty() || width == 0 || height == 0) return
-        val old = geometry
-        val page = currentPage
-        val fraction = if (old == null) 0f else
-            ((transform.y / transform.scale - old.tops[page]) / old.heights[page]).coerceIn(0f, 1f)
         val updated = PdfGeometry(sizes, width.toFloat(), context.dp(8).toFloat(), context.dp(12).toFloat())
         geometry = updated
-        transform.setBounds(width.toFloat(), height.toFloat(), updated.totalHeight)
-        transform.moveTo(transform.x, (updated.tops[page] + updated.heights[page] * fraction) * transform.scale)
+        transform.restore(updated, height.toFloat(), document.position)
         positionChanged()
     }
 
@@ -161,7 +148,7 @@ internal class PdfViewport(
                 layout.margin + layout.pageWidth, layout.tops[index] + layout.heights[index])
             paint.color = Color.WHITE
             canvas.drawRect(pageRect, paint)
-            val bitmap = cache.get(index)
+            val bitmap = cache[pageKeys[index]]
             if (bitmap != null) {
                 canvas.drawBitmap(bitmap, null, pageRect, paint)
             } else {
@@ -269,6 +256,7 @@ internal class PdfViewport(
     }
 
     private fun positionChanged() {
+        geometry?.let { document.position = transform.capture(it) }
         val page = currentPage
         if (announcedPage != page) {
             announcedPage = page
@@ -280,7 +268,7 @@ internal class PdfViewport(
     }
 
     private fun scheduleRender() {
-        if (disposed || rendering || pendingRequest || geometry == null) return
+        if (disposed || document.isRendering || pendingRequest || geometry == null) return
         pendingRequest = true
         postOnAnimation {
             pendingRequest = false
@@ -290,52 +278,37 @@ internal class PdfViewport(
 
     private fun renderNext() {
         val layout = geometry ?: return
-        if (rendering) return
+        if (document.isRendering) return
         val first = layout.pageAt(transform.y / transform.scale)
         val last = layout.pageAt((transform.y + height) / transform.scale)
         // Prioritize visible pages; only one native render is queued so flings cannot build a backlog.
         val desired = (layout.pageWidth * if (pinching || !scroller.isFinished) 1f else transform.scale)
             .toInt().coerceAtLeast(1)
-        val pixelsPerPage = cache.maxSize().toDouble() / (last - first + 2) / 4
+        val pixelsPerPage = cache.maxBytes.toDouble() / (last - first + 2) / 4
         fun targetWidth(index: Int) = sizes[index].renderWidth(
             minOf(desired, sqrt(pixelsPerPage / sizes[index].aspectRatio).toInt().coerceAtLeast(1)))
         var index = (first..last).firstOrNull {
-            val cached = cache.get(it)
+            val cached = cache[pageKeys[it]]
             it !in failedPages && (cached == null || cached.width < targetWidth(it))
         }
         var requested = index?.let(::targetWidth) ?: 0
         if (index == null) {
             index = listOf(last + 1, first - 1).firstOrNull {
-                if (it !in sizes.indices || it in failedPages || cache.get(it) != null) false
+                if (it !in sizes.indices || it in failedPages || cache[pageKeys[it]] != null) false
                 else {
                     val width = sizes[it].renderWidth(layout.pageWidth.toInt())
                     val bytes = width.toDouble() * width * sizes[it].aspectRatio * 4
-                    bytes + cache.size() <= cache.maxSize()
+                    bytes + cache.sizeBytes <= cache.maxBytes
                 }
             } ?: return
             requested = sizes[index].renderWidth(layout.pageWidth.toInt())
         }
-        val page = index
-        rendering = true
-        engine.render(page, requested) { result ->
-            rendering = false
-            if (disposed) {
-                result.getOrNull()?.recycle()
-                return@render
-            }
-            result.fold(
-                onSuccess = { bitmap ->
-                    cache.put(page, bitmap)
-                    postInvalidateOnAnimation()
-                },
-                onFailure = { error ->
-                    failedPages.add(page)
-                    Log.e("PdfViewport", "Could not render PDF page ${page + 1}", error)
-                    invalidate()
-                },
-            )
-            scheduleRender()
-        }
+        document.render(index, requested)
+    }
+
+    fun refreshPages() {
+        postInvalidateOnAnimation()
+        scheduleRender()
     }
 
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
@@ -370,6 +343,5 @@ internal class PdfViewport(
     fun dispose() {
         disposed = true
         stopMotion()
-        cache.evictAll()
     }
 }

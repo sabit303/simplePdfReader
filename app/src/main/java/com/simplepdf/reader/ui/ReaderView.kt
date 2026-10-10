@@ -11,19 +11,21 @@ import android.widget.LinearLayout
 import com.simplepdf.reader.R
 import com.simplepdf.reader.data.OpenPdfTab
 
-class ReaderView(
+internal class ReaderView(
     context: Context,
     val tab: OpenPdfTab,
+    private val document: PdfDocumentState,
     private val onPageChanged: (Int) -> Unit,
     onScrollDirection: (Boolean) -> Unit,
     private val onPageTap: () -> Unit,
     private val onControlsInteraction: (Boolean) -> Unit,
     onRetry: () -> Unit,
 ) : FrameLayout(context) {
-    private val engine = PdfEngine()
     private val viewport = PdfViewport(
-        context, engine, ::updatePosition, ::onViewportScrollChanged, onScrollDirection, onPageTap,
+        context, document, ::updatePosition, ::onViewportScrollChanged, onScrollDirection, onPageTap,
     )
+    private val documentObserver: () -> Unit = ::onDocumentChanged
+    private var jumpDialog: AlertDialog? = null
     private val topBar = context.label(tab.document.title, 16f, true).apply {
         id = R.id.reader_top_bar
         maxLines = 1
@@ -66,21 +68,27 @@ class ReaderView(
         addView(flag, LayoutParams(context.dp(56), context.dp(48), Gravity.RIGHT or Gravity.TOP))
         addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> flag.updatePosition() }
         flag.visibility = GONE
-        engine.open(tab.document.path) { result ->
-            result.fold(
-                onSuccess = { sizes ->
-                    pageCount = sizes.size
-                    flag.pageCount = pageCount
-                    ready = true
-                    setFlagVisible(flagVisible, animate = false)
-                    errorPanel.visibility = GONE
-                    viewport.setDocument(sizes, tab.pageIndex)
-                },
-                onFailure = { error ->
-                    message.text = context.getString(R.string.pdf_error, error.localizedMessage.orEmpty())
-                    errorPanel.getChildAt(1).visibility = VISIBLE
-                },
-            )
+        document.observe(documentObserver)
+    }
+
+    private fun onDocumentChanged() {
+        val sizes = document.pages
+        if (sizes != null) {
+            if (!ready) {
+                pageCount = sizes.size
+                flag.pageCount = pageCount
+                ready = true
+                setFlagVisible(flagVisible, animate = false)
+                errorPanel.visibility = GONE
+                viewport.setDocument(sizes)
+            } else {
+                viewport.refreshPages()
+            }
+        } else {
+            document.error?.let { error ->
+                message.text = context.getString(R.string.pdf_error, error.localizedMessage.orEmpty())
+                errorPanel.getChildAt(1).visibility = VISIBLE
+            }
         }
     }
 
@@ -105,6 +113,14 @@ class ReaderView(
             topBar.translationY = offset
             topBar.alpha = if (visible) 1f else 0f
             topBar.visibility = if (visible) VISIBLE else INVISIBLE
+        }
+    }
+
+    fun setSideInsets(left: Int, right: Int) {
+        topBar.setPadding(context.dp(20) + left, 0, context.dp(20) + right, 0)
+        (flag.layoutParams as LayoutParams).apply {
+            rightMargin = right
+            flag.layoutParams = this
         }
     }
 
@@ -172,14 +188,18 @@ class ReaderView(
             dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
         }
         dialog.setOnDismissListener { onControlsInteraction(false) }
+        jumpDialog = dialog
         dialog.show()
     }
 
     fun dispose() {
+        document.removeObserver(documentObserver)
+        jumpDialog?.setOnDismissListener(null)
+        jumpDialog?.dismiss()
+        jumpDialog = null
         removeCallbacks(hideFlag)
         topBar.animate().cancel()
         flag.animate().cancel()
         viewport.dispose()
-        engine.close()
     }
 }

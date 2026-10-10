@@ -78,4 +78,38 @@ internal class PdfTransform {
         scale = clamped
         moveTo((x + focusX) * factor - focusX, (y + focusY) * factor - focusY)
     }
+
+    fun capture(layout: PdfGeometry): PdfReadingPosition {
+        val page = layout.pageAt(y / scale)
+        return PdfReadingPosition(
+            pageIndex = page,
+            pageOffset = (y / scale - layout.tops[page]) / layout.heights[page],
+            zoom = scale,
+            horizontalOffset = if (maxX == 0f) 0f else x / maxX,
+        )
+    }
+
+    fun restore(layout: PdfGeometry, height: Float, position: PdfReadingPosition) {
+        setBounds(layout.viewportWidth, height, layout.totalHeight)
+        zoomTo(position.zoom, 0f, 0f)
+        val page = position.pageIndex.coerceIn(layout.pages.indices)
+        moveTo(
+            maxX * position.horizontalOffset,
+            (layout.tops[page] + layout.heights[page] * position.pageOffset) * scale,
+        )
+    }
+}
+
+internal data class PdfReadingPosition(
+    val pageIndex: Int,
+    val pageOffset: Float = 0f,
+    val zoom: Float = 1f,
+    val horizontalOffset: Float = 0f,
+) {
+    init {
+        require(pageIndex >= 0)
+        require(pageOffset.isFinite())
+        require(zoom in 1f..5f)
+        require(horizontalOffset in 0f..1f)
+    }
 }

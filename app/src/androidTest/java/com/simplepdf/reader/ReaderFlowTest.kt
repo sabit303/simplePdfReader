@@ -1,28 +1,42 @@
 package com.simplepdf.reader
 
 import android.content.Context
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Insets
 import android.graphics.pdf.PdfDocument as AndroidPdf
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowManager
 import android.widget.Button
+import android.widget.FrameLayout
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.runner.AndroidJUnit4
+import androidx.test.filters.SdkSuppress
 import com.simplepdf.reader.data.PdfDocument
 import com.simplepdf.reader.data.ReaderSession
 import com.simplepdf.reader.data.SessionStore
 import com.simplepdf.reader.ui.PageFlag
+import com.simplepdf.reader.ui.PdfDocumentState
+import com.simplepdf.reader.ui.PdfPageKey
+import com.simplepdf.reader.ui.PdfReadingPosition
+import com.simplepdf.reader.ui.PdfResources
 import com.simplepdf.reader.ui.PdfViewport
 import com.simplepdf.reader.ui.ReaderView
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -99,6 +113,180 @@ class ReaderFlowTest {
             })
         }
         awaitCondition { SessionStore(context).load().tabs.isEmpty() }
+    }
+
+    @Test
+    fun warmTabSwitchReusesDocumentAndCachedPagesWithoutLoadingScreen() {
+        launch()
+        awaitPage(1, 3)
+        lateinit var document: PdfDocumentState
+        lateinit var position: PdfReadingPosition
+        lateinit var cachedPage: Bitmap
+        onActivity {
+            it.views().filterIsInstance<PdfViewport>().single().performAccessibilityAction(R.id.zoom_in, null)
+        }
+        awaitCondition { it.views().filterIsInstance<PdfViewport>().single().zoom >= 1.49f }
+        onActivity {
+            val viewport = it.views().filterIsInstance<PdfViewport>().single()
+            viewport.scrollToProgress(0.35f)
+            document = viewport.document
+            position = document.position
+        }
+        awaitCondition {
+            !document.isRendering && document.cache[PdfPageKey(second.path, position.pageIndex)] != null
+        }
+        onActivity { activity ->
+            cachedPage = checkNotNull(document.cache[PdfPageKey(second.path, position.pageIndex)])
+            activity.selectPdfTab(first.title)
+        }
+        awaitPage(4, 8)
+        onActivity { activity ->
+            assertSame(document.cache, activity.views().filterIsInstance<PdfViewport>().single().document.cache)
+            activity.selectPdfTab(second.title)
+            assertSame(document, activity.views().filterIsInstance<PdfViewport>().single().document)
+            assertNoOpeningMessage(activity)
+            assertSame(cachedPage, document.cache[PdfPageKey(second.path, position.pageIndex)])
+        }
+        awaitCondition { it.views().filterIsInstance<PdfViewport>().single().zoom == position.zoom }
+        onActivity { assertPositionEquals(position, document.position) }
+    }
+
+    @Test
+    fun rotationAndRecreationReuseResourcesAndPreserveZoomAndPosition() {
+        launch()
+        awaitPage(1, 3)
+        onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+        awaitCondition { it.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT }
+        onActivity {
+            it.views().filterIsInstance<PdfViewport>().single().performAccessibilityAction(R.id.zoom_in, null)
+        }
+        awaitCondition { it.views().filterIsInstance<PdfViewport>().single().zoom >= 1.49f }
+        lateinit var resources: PdfResources
+        lateinit var document: PdfDocumentState
+        lateinit var position: PdfReadingPosition
+        onActivity {
+            resources = it.pdfResources
+            val viewport = it.views().filterIsInstance<PdfViewport>().single()
+            viewport.scrollToProgress(0.35f)
+            document = viewport.document
+            position = document.position
+        }
+        scenario!!.recreate()
+        onActivity {
+            assertSame(resources, it.pdfResources)
+            assertSame(document, it.views().filterIsInstance<PdfViewport>().single().document)
+            assertNoOpeningMessage(it)
+            it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
+        awaitCondition {
+            it.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+                it.views().filterIsInstance<PdfViewport>().single().width >
+                it.views().filterIsInstance<PdfViewport>().single().height
+        }
+        onActivity {
+            assertSame(resources, it.pdfResources)
+            assertSame(document, it.views().filterIsInstance<PdfViewport>().single().document)
+            assertNoOpeningMessage(it)
+            assertPositionEquals(position, document.position)
+            it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        awaitCondition {
+            it.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT &&
+                it.views().filterIsInstance<PdfViewport>().single().height >
+                it.views().filterIsInstance<PdfViewport>().single().width
+        }
+        onActivity { assertPositionEquals(position, document.position) }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 30)
+    fun landscapeCutoutDoesNotReserveAFullHeightReaderStrip() {
+        launch()
+        awaitPage(1, 3)
+        onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+        awaitCondition { it.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE }
+        onActivity { activity ->
+            val root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+            val title = activity.findViewById<View>(R.id.reader_top_bar)
+            val flag = activity.views().filterIsInstance<PageFlag>().single()
+            val normalPadding = (20 * activity.resources.displayMetrics.density + 0.5f).toInt()
+            fun applyCutout(left: Int, right: Int) {
+                root.dispatchApplyWindowInsets(WindowInsets.Builder()
+                    .setInsets(WindowInsets.Type.statusBars(), Insets.of(0, 24, 0, 0))
+                    .setInsets(WindowInsets.Type.navigationBars(), Insets.of(0, 0, 48, 0))
+                    .setInsets(WindowInsets.Type.displayCutout(), Insets.of(left, 0, right, 0))
+                    .build())
+            }
+            applyCutout(72, 0)
+            assertEquals(0, root.paddingLeft)
+            assertEquals(48, root.paddingRight)
+            assertEquals(normalPadding + 72, title.paddingLeft)
+            assertEquals(0, (flag.layoutParams as FrameLayout.LayoutParams).rightMargin)
+            applyCutout(0, 72)
+            assertEquals(0, root.paddingLeft)
+            assertEquals(48, root.paddingRight)
+            assertEquals(normalPadding, title.paddingLeft)
+            assertEquals(normalPadding + 24, title.paddingRight)
+            assertEquals(24, (flag.layoutParams as FrameLayout.LayoutParams).rightMargin)
+            applyCutout(0, 0)
+            assertEquals(normalPadding, title.paddingRight)
+            assertEquals(0, (flag.layoutParams as FrameLayout.LayoutParams).rightMargin)
+            assertEquals(WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS,
+                activity.window.attributes.layoutInDisplayCutoutMode)
+        }
+    }
+
+    @Test
+    fun memoryPressureReleasesInactiveRendererButKeepsTabPosition() {
+        launch()
+        awaitPage(1, 3)
+        lateinit var inactive: PdfDocumentState
+        lateinit var position: PdfReadingPosition
+        onActivity {
+            val viewport = it.views().filterIsInstance<PdfViewport>().single()
+            viewport.scrollToProgress(0.45f)
+            inactive = viewport.document
+            position = inactive.position
+            it.selectPdfTab(first.title)
+        }
+        awaitPage(4, 8)
+        onActivity {
+            it.pdfResources.trimMemory()
+            assertFalse(inactive.isOpen)
+            assertTrue(it.views().filterIsInstance<PdfViewport>().single().document.isOpen)
+            assertPositionEquals(position, inactive.position)
+            it.selectPdfTab(second.title)
+        }
+        awaitPage(position.pageIndex + 1, 3)
+        onActivity {
+            assertSame(inactive, it.views().filterIsInstance<PdfViewport>().single().document)
+            assertPositionEquals(position, inactive.position)
+        }
+    }
+
+    @Test
+    fun finishingAppReleasesResourcesAndRestoresTabsWithFreshDocuments() {
+        launch()
+        awaitPage(1, 3)
+        lateinit var resources: PdfResources
+        lateinit var document: PdfDocumentState
+        onActivity {
+            resources = it.pdfResources
+            document = it.views().filterIsInstance<PdfViewport>().single().document
+            it.views().filterIsInstance<ReaderView>().single().jumpTo(1)
+        }
+        awaitPage(2, 3)
+        scenario!!.close()
+        scenario = null
+        assertFalse(document.isOpen)
+        assertEquals(0, resources.cache.sizeBytes)
+        launch()
+        awaitPage(2, 3)
+        onActivity {
+            assertNotSame(resources, it.pdfResources)
+            assertNotSame(document, it.views().filterIsInstance<PdfViewport>().single().document)
+            assertEquals(2, SessionStore(context).load().tabs.size)
+        }
     }
 
     @Test
@@ -410,6 +598,26 @@ class ReaderFlowTest {
 
     private fun onActivity(block: (MainActivity) -> Unit) {
         scenario!!.onActivity(block)
+    }
+
+    private fun MainActivity.selectPdfTab(title: String) {
+        views().filterIsInstance<android.widget.TextView>().first {
+            it.text == title && it.isClickable && it.id != R.id.reader_top_bar
+        }.performClick()
+    }
+
+    private fun assertNoOpeningMessage(activity: MainActivity) {
+        assertFalse(activity.views().filterIsInstance<android.widget.TextView>().any {
+            it.text == context.getString(R.string.loading_pdf) && it.visibility == View.VISIBLE &&
+                (it.parent as? View)?.visibility == View.VISIBLE
+        })
+    }
+
+    private fun assertPositionEquals(expected: PdfReadingPosition, actual: PdfReadingPosition) {
+        assertEquals(expected.pageIndex, actual.pageIndex)
+        assertEquals(expected.pageOffset, actual.pageOffset, 0.001f)
+        assertEquals(expected.zoom, actual.zoom, 0.001f)
+        assertEquals(expected.horizontalOffset, actual.horizontalOffset, 0.001f)
     }
 
     private fun MainActivity.controlsHaveVisibility(visibility: Int): Boolean {

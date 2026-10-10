@@ -2,8 +2,10 @@ package com.simplepdf.reader
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.ComponentCallbacks2
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -18,18 +20,22 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.Toast
 import com.simplepdf.reader.data.PdfDocument
+import com.simplepdf.reader.data.LibraryState
 import com.simplepdf.reader.data.PdfScanner
 import com.simplepdf.reader.data.ReaderSession
+import com.simplepdf.reader.data.ScanResult
 import com.simplepdf.reader.data.SessionStore
 import com.simplepdf.reader.data.sharedStorageRoots
 import com.simplepdf.reader.ui.HomeView
 import com.simplepdf.reader.ui.Palette
+import com.simplepdf.reader.ui.PdfResources
 import com.simplepdf.reader.ui.ReaderView
 import com.simplepdf.reader.ui.action
 import com.simplepdf.reader.ui.dp
@@ -38,9 +44,7 @@ import com.simplepdf.reader.ui.rounded
 import org.json.JSONException
 import java.io.IOException
 import java.util.Locale
-import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
 
 class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
@@ -54,9 +58,13 @@ class MainActivity : Activity() {
     private lateinit var home: HomeView
     private lateinit var tabBar: LinearLayout
     private var reader: ReaderView? = null
-    private var library: List<PdfDocument> = emptyList()
-    private var scan: Future<*>? = null
-    private var scanGeneration = 0
+    internal lateinit var pdfResources: PdfResources
+        private set
+    internal lateinit var libraryState: LibraryState
+        private set
+    private val libraryObserver: () -> Unit = ::showLibrary
+    private var leftContentInset = 0
+    private var rightContentInset = 0
     private var tabsVisible = true
     private var previousAccess = false
     private var stopped = false
@@ -65,6 +73,14 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val retained = lastNonConfigurationInstance as? RetainedState
+        pdfResources = retained?.pdfs ?: PdfResources(
+            PdfResources.cacheBudget(
+                Runtime.getRuntime().maxMemory(),
+                (getSystemService(ACTIVITY_SERVICE) as ActivityManager).isLowRamDevice,
+            ),
+        )
+        libraryState = retained?.library ?: createLibraryState()
         store = SessionStore(this)
         importer = DocumentImporter(this)
         session = try {
@@ -83,6 +99,7 @@ class MainActivity : Activity() {
         content = FrameLayout(this)
         root.addView(content, FrameLayout.LayoutParams(-1, -1))
         home = HomeView(this, ::openPicker, ::refreshLibrary, ::requestStorageAccess, ::openDocument)
+        home.restoreState(savedInstanceState)
         tabBar = LinearLayout(this).apply {
             id = R.id.tab_bar
             orientation = LinearLayout.HORIZONTAL
@@ -99,22 +116,62 @@ class MainActivity : Activity() {
         })
         setContentView(root)
         applyInsets()
-        previousAccess = hasStorageAccess()
+        previousAccess = libraryState.snapshot.access ?: hasStorageAccess()
         showSelectedTab()
-        refreshLibrary()
+        libraryState.ensureLoaded(previousAccess)
+        libraryState.observe(libraryObserver)
         if (savedInstanceState == null) handleOpenIntent(intent)
     }
 
+    @Suppress("DEPRECATION")
     private fun applyInsets() {
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30)
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         if (Build.VERSION.SDK_INT >= 30) {
             window.setDecorFitsSystemWindows(false)
-            root.setOnApplyWindowInsetsListener { view, insets ->
-                val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-                insets
-            }
         } else {
-            root.fitsSystemWindows = true
+            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                val cutout = insets.getInsets(WindowInsets.Type.displayCutout())
+                val ime = insets.getInsets(WindowInsets.Type.ime())
+                setContentInsets(bars.left, maxOf(bars.top, cutout.top), bars.right,
+                    maxOf(bars.bottom, cutout.bottom, ime.bottom), cutout.left, cutout.right)
+            } else {
+                val cutoutLeft = if (Build.VERSION.SDK_INT >= 28) insets.displayCutout?.safeInsetLeft ?: 0 else 0
+                val cutoutRight = if (Build.VERSION.SDK_INT >= 28) insets.displayCutout?.safeInsetRight ?: 0 else 0
+                setContentInsets(
+                    if (insets.systemWindowInsetLeft <= cutoutLeft) 0 else insets.systemWindowInsetLeft,
+                    insets.systemWindowInsetTop,
+                    if (insets.systemWindowInsetRight <= cutoutRight) 0 else insets.systemWindowInsetRight,
+                    insets.systemWindowInsetBottom, cutoutLeft, cutoutRight,
+                )
+            }
+            insets
+        }
+        root.requestApplyInsets()
+    }
+
+    private fun setContentInsets(left: Int, top: Int, right: Int, bottom: Int, cutoutLeft: Int, cutoutRight: Int) {
+        root.setPadding(left, top, right, bottom)
+        // Inset controls around a camera cutout without shrinking the entire PDF viewport.
+        leftContentInset = (cutoutLeft - left).coerceAtLeast(0)
+        rightContentInset = (cutoutRight - right).coerceAtLeast(0)
+        home.setPadding(leftContentInset, 0, rightContentInset, 0)
+        reader?.setSideInsets(leftContentInset, rightContentInset)
+        (tabBar.layoutParams as FrameLayout.LayoutParams).apply {
+            leftMargin = leftContentInset
+            rightMargin = rightContentInset
+            tabBar.layoutParams = this
         }
     }
 
@@ -124,6 +181,8 @@ class MainActivity : Activity() {
         val access = hasStorageAccess()
         if (::home.isInitialized && access != previousAccess) {
             previousAccess = access
+            detachReader()
+            pdfResources.invalidateAll()
             refreshLibrary()
             if (session.selectedPath != null) showSelectedTab()
         }
@@ -138,13 +197,39 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        scanGeneration++
-        scan?.cancel(true)
-        reader?.dispose()
+        libraryState.removeObserver(libraryObserver)
+        detachReader()
+        if (!isChangingConfigurations) {
+            pdfResources.close()
+            libraryState.close()
+        }
         main.removeCallbacksAndMessages(null)
         io.shutdownNow()
         sessionWrites.shutdown()
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onRetainNonConfigurationInstance(): Any = RetainedState(pdfResources, libraryState)
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        home.saveState(outState)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (::pdfResources.isInitialized &&
+            (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+                level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)) {
+            pdfResources.trimMemory()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        if (::pdfResources.isInitialized) pdfResources.trimMemory()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -189,54 +274,50 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == STORAGE_REQUEST) {
             previousAccess = hasStorageAccess()
+            detachReader()
+            pdfResources.invalidateAll()
             refreshLibrary()
             if (!previousAccess) Toast.makeText(this, R.string.access_denied, Toast.LENGTH_LONG).show()
-            else if (session.selectedPath != null) showSelectedTab()
+            if (session.selectedPath != null) showSelectedTab()
         }
     }
 
     private fun refreshLibrary() {
-        val access = hasStorageAccess()
-        home.setAccess(access)
-        home.showLoading()
-        scan?.cancel(true)
-        val generation = ++scanGeneration
-        scan = io.submit {
-            try {
-                val result = if (access) PdfScanner.scan(sharedStorageRoots(this)) {
-                    Thread.currentThread().isInterrupted
-                } else null
-                val documents = (result?.documents.orEmpty() + importer.documents())
+        libraryState.refresh(hasStorageAccess())
+    }
+
+    private fun showLibrary() {
+        val snapshot = libraryState.snapshot
+        val error = snapshot.error
+        val warning = when {
+            error != null -> {
+                Log.e(TAG, "Library scan failed", error)
+                getString(R.string.scan_failed, error.localizedMessage.orEmpty())
+            }
+            snapshot.unreadableDirectories > 0 -> resources.getQuantityString(
+                R.plurals.scan_warning, snapshot.unreadableDirectories, snapshot.unreadableDirectories)
+            else -> null
+        }
+        home.showLibrary(snapshot.documents, snapshot.access == true, snapshot.isLoading, warning)
+    }
+
+    private fun createLibraryState(): LibraryState {
+        val application = applicationContext
+        val libraryImporter = DocumentImporter(application)
+        val callbacks = Handler(Looper.getMainLooper())
+        return LibraryState(
+            dispatch = { callback -> callbacks.post { callback() } },
+            scan = { access, cancelled ->
+                val result = if (access) PdfScanner.scan(sharedStorageRoots(application), cancelled) else null
+                val documents = (result?.documents.orEmpty() + libraryImporter.documents())
                     .distinctBy { it.path }
                     .sortedWith(compareByDescending<PdfDocument> { it.modifiedAt }
                         .thenBy { it.title.lowercase(Locale.ROOT) }
                         .thenBy { it.title }
                         .thenBy { it.path })
-                main.post {
-                    if (!isDestroyed && generation == scanGeneration) {
-                        library = documents
-                        val unreadable = result?.unreadableDirectories ?: 0
-                        home.showDocuments(library, if (unreadable > 0)
-                            resources.getQuantityString(R.plurals.scan_warning, unreadable, unreadable) else null)
-                    }
-                }
-            } catch (_: CancellationException) {
-                Log.d(TAG, "Superseded library scan cancelled.")
-            } catch (error: IOException) {
-                scanFailed(generation, error)
-            } catch (error: SecurityException) {
-                scanFailed(generation, error)
-            }
-        }
-    }
-
-    private fun scanFailed(generation: Int, error: Exception) {
-        Log.e(TAG, "Library scan failed", error)
-        main.post {
-            if (!isDestroyed && generation == scanGeneration) {
-                home.showDocuments(library, getString(R.string.scan_failed, error.localizedMessage.orEmpty()))
-            }
-        }
+                ScanResult(documents, result?.unreadableDirectories ?: 0)
+            },
+        )
     }
 
     private fun openPicker() {
@@ -264,6 +345,8 @@ class MainActivity : Activity() {
                 val document = importer.import(uri)
                 main.post {
                     if (!isDestroyed) {
+                        if (reader?.tab?.document?.path == document.path) detachReader()
+                        pdfResources.invalidate(document.path)
                         openDocument(document)
                         refreshLibrary()
                     }
@@ -302,6 +385,8 @@ class MainActivity : Activity() {
 
     private fun closeTab(path: String) {
         val wasSelected = session.selectedPath == path
+        if (wasSelected) detachReader()
+        pdfResources.closeTab(path)
         session = session.close(path)
         saveSession()
         if (wasSelected) showSelectedTab() else rebuildTabs()
@@ -309,14 +394,14 @@ class MainActivity : Activity() {
 
     private fun showSelectedTab() {
         main.removeCallbacks(hideTabs)
-        reader?.dispose()
-        reader = null
+        detachReader()
         content.removeAllViews()
         val selected = session.tabs.firstOrNull { it.document.path == session.selectedPath }
         if (selected == null) {
+            pdfResources.showHome()
             content.addView(home, FrameLayout.LayoutParams(-1, -1))
         } else {
-            reader = ReaderView(this, selected, { page ->
+            reader = ReaderView(this, selected, pdfResources.activate(selected), { page ->
                 if (session.tabs.any { it.document.path == selected.document.path }) {
                     session = session.updatePage(selected.document.path, page)
                     main.removeCallbacks(persist)
@@ -329,12 +414,24 @@ class MainActivity : Activity() {
                 } else {
                     showTabsTemporarily()
                 }
-            }, ::toggleReaderControls, ::onControlsInteraction, ::showSelectedTab)
+            }, ::toggleReaderControls, ::onControlsInteraction, ::retrySelectedTab)
+            reader?.setSideInsets(leftContentInset, rightContentInset)
             content.addView(reader, FrameLayout.LayoutParams(-1, -1))
         }
         rebuildTabs()
         setTabsVisible(true, animate = false)
         if (selected != null) main.postDelayed(hideTabs, 3500)
+    }
+
+    private fun detachReader() {
+        reader?.dispose()
+        reader = null
+    }
+
+    private fun retrySelectedTab() {
+        detachReader()
+        session.selectedPath?.let(pdfResources::invalidate)
+        showSelectedTab()
     }
 
     private fun rebuildTabs() {
@@ -465,4 +562,6 @@ class MainActivity : Activity() {
         private const val STORAGE_REQUEST = 100
         private const val OPEN_REQUEST = 101
     }
+
+    private data class RetainedState(val pdfs: PdfResources, val library: LibraryState)
 }

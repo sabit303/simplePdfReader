@@ -1,0 +1,46 @@
+<resources>
+    <string name="app_name">Simple PDF</string>
+    <string name="library">Your library</string>
+    <string name="library_subtitle">All your PDFs. Right where you left them.</string>
+    <string name="home">Home</string>
+    <string name="open_pdf">Open PDF</string>
+    <string name="refresh">Refresh library</string>
+    <string name="search_hint">Search PDFs</string>
+    <string name="sort_label">NEWEST MODIFIED FIRST</string>
+    <string name="pdf_count">%1$d PDFs</string>
+    <string name="scanning">Looking for PDFs on your device&#8230;</string>
+    <string name="storage_title">Your PDFs, in one place</string>
+    <string name="storage_message">Allow file access to find PDFs across shared storage. Your files stay on this device. Android protects other apps\' private folders.</string>
+    <string name="allow_access">Allow file access</string>
+    <string name="storage_settings_unavailable">Storage settings are unavailable. You can still use Open PDF.</string>
+    <string name="access_denied">File access was not granted. You can still open individual PDFs.</string>
+    <string name="empty_library">No PDFs here yet</string>
+    <string name="empty_library_detail">Copy PDFs to Downloads or open a document using the button above.</string>
+    <string name="no_matches">No matching PDFs</string>
+    <plurals name="scan_warning">
+        <item quantity="one">%1$d folder could not be read.</item>
+        <item quantity="other">%1$d folders could not be read.</item>
+    </plurals>
+    <string name="scan_failed">Could not scan storage: %1$s</string>
+    <string name="file_details">Modified %1$s  /  %2$s</string>
+    <string name="close_tab">Close %1$s</string>
+    <string name="page_image">PDF page %1$d</string>
+    <string name="page_flag_accessibility">Page %1$d of %2$d. Drag to scroll or tap to jump.</string>
+    <string name="zoom_in">Zoom in</string>
+    <string name="zoom_out">Zoom out</string>
+    <string name="jump_title">Jump to page</string>
+    <string name="jump_hint">Page number (1&#8211;%1$d)</string>
+    <string name="jump">Go</string>
+    <string name="cancel">Cancel</string>
+    <string name="invalid_page">Enter a page from 1 to %1$d</string>
+    <string name="loading_pdf">Opening PDF&#8230;</string>
+    <string name="pdf_error">Could not open this PDF.\n\nIt may have moved, require file access, be password-protected, or be damaged.\n\n%1$s</string>
+    <string name="retry">Retry</string>
+    <string name="render_error">Could not render page %1$d. Tap to retry.</string>
+    <string name="session_error">Saved tabs could not be restored: %1$s</string>
+    <string name="import_error">Could not open PDF: %1$s</string>
+    <string name="importing">Preparing PDF&#8230;</string>
+    <string name="picker_unavailable">No document picker is available on this device.</string>
+    <string name="save_error">Could not save tabs. Check available device storage.</string>
+    <string name="untitled_pdf">Document.pdf</string>
+</resources>

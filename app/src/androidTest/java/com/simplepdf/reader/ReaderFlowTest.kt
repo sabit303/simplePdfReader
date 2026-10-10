@@ -145,17 +145,142 @@ class ReaderFlowTest {
     }
 
     @Test
-    fun scrollDirectionControlsBarsAndFlag() {
+    fun scrollingUpRestoresBarsAndScrollingDownShowsOnlyFlag() {
+        launch()
+        awaitPage(1, 3)
+        onActivity { it.views().filterIsInstance<PdfViewport>().single().performClick() }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+        onActivity { activity ->
+            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true)
+        }
+        awaitCondition { it.onlyScrollFlagIsVisible() }
+        onActivity { activity ->
+            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false)
+        }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity { activity ->
+            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true)
+        }
+        awaitCondition { it.onlyScrollFlagIsVisible() }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+    }
+
+    @Test
+    fun upwardSwipeAtTopRestoresHiddenBars() {
         launch()
         awaitPage(1, 3)
         onActivity { activity ->
-            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true)
+            activity.views().filterIsInstance<PdfViewport>().single().scrollToProgress(0f)
+            activity.views().filterIsInstance<PdfViewport>().single().performClick()
         }
         awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
         onActivity { activity ->
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false)
         }
         awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity {
+            assertEquals(0f, it.views().filterIsInstance<PdfViewport>().single().scrollPosition, 0.01f)
+        }
+    }
+
+    @Test
+    fun reversingDirectionDuringOneDragRestoresBars() {
+        launch()
+        awaitPage(1, 3)
+        val downTime = SystemClock.uptimeMillis()
+        onActivity { activity ->
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            pageTouch(viewport, downTime, downTime, MotionEvent.ACTION_DOWN, viewport.height * 0.75f)
+            pageTouch(viewport, downTime, downTime + 20, MotionEvent.ACTION_MOVE, viewport.height * 0.4f)
+        }
+        awaitCondition { it.onlyScrollFlagIsVisible() }
+        onActivity { activity ->
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            val time = SystemClock.uptimeMillis()
+            pageTouch(viewport, downTime, time, MotionEvent.ACTION_MOVE, viewport.height * 0.6f)
+            pageTouch(viewport, downTime, time + 20, MotionEvent.ACTION_CANCEL, viewport.height * 0.6f)
+        }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+    }
+
+    @Test
+    fun flagStartsHidingTwoSecondsAfterDownwardScrollStops() {
+        launch()
+        awaitPage(1, 3)
+        onActivity {
+            swipe(it.views().filterIsInstance<PdfViewport>().single(), down = true)
+        }
+        val stoppedAt = SystemClock.uptimeMillis()
+        awaitCondition { it.onlyScrollFlagIsVisible() }
+        Thread.sleep(1000)
+        onActivity { assertTrue(it.onlyScrollFlagIsVisible()) }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+        val elapsed = SystemClock.uptimeMillis() - stoppedAt
+        assertTrue("Flag hid too early: $elapsed ms", elapsed >= 2000)
+        assertTrue("Flag did not hide after the two-second delay: $elapsed ms", elapsed < 3000)
+    }
+
+    @Test
+    fun upwardFlingToTopRestoresBars() {
+        launch()
+        awaitPage(1, 3)
+        onActivity { activity ->
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            viewport.scrollToProgress(0.5f)
+            viewport.performClick()
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+        onActivity { activity ->
+            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false, fling = true)
+        }
+        awaitCondition {
+            it.controlsHaveVisibility(View.VISIBLE) &&
+                it.views().filterIsInstance<PdfViewport>().single().scrollPosition == 0f
+        }
+    }
+
+    @Test
+    fun holdingAPageDragKeepsFlagVisiblePastAutoHideDelay() {
+        launch()
+        awaitPage(1, 3)
+        val downTime = SystemClock.uptimeMillis()
+        onActivity { activity ->
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            pageTouch(viewport, downTime, downTime, MotionEvent.ACTION_DOWN, viewport.height * 0.75f)
+            pageTouch(viewport, downTime, downTime + 20, MotionEvent.ACTION_MOVE, viewport.height * 0.5f)
+        }
+        awaitCondition { it.onlyScrollFlagIsVisible() }
+        Thread.sleep(4000)
+        onActivity { activity ->
+            assertTrue(activity.onlyScrollFlagIsVisible())
+            val viewport = activity.views().filterIsInstance<PdfViewport>().single()
+            pageTouch(viewport, downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL, viewport.height * 0.5f)
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+    }
+
+    @Test
+    fun flingKeepsFlagVisibleAndPageTapStillRestoresBars() {
+        launch()
+        awaitPage(1, 3)
+        onActivity { activity ->
+            activity.views().filterIsInstance<android.widget.TextView>()
+                .first { it.text == first.title && it.isClickable }.performClick()
+        }
+        awaitPage(4, 8)
+        onActivity { activity ->
+            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true, fling = true)
+        }
+        awaitCondition {
+            it.onlyScrollFlagIsVisible() && it.views().filterIsInstance<PdfViewport>().single().isFlinging
+        }
+        awaitCondition { !it.views().filterIsInstance<PdfViewport>().single().isFlinging }
+        onActivity { activity ->
+            assertTrue(activity.onlyScrollFlagIsVisible())
+            activity.views().filterIsInstance<PdfViewport>().single().performClick()
+        }
+        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity { it.views().filterIsInstance<PdfViewport>().single().performClick() }
         awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
@@ -260,23 +385,26 @@ class ReaderFlowTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
     }
 
-    private fun swipe(view: View, down: Boolean) {
+    private fun swipe(view: View, down: Boolean, fling: Boolean = false) {
         val start = if (down) view.height * 0.75f else view.height * 0.25f
         val end = if (down) view.height * 0.25f else view.height * 0.75f
         val time = SystemClock.uptimeMillis()
         repeat(5) { step ->
             val action = when (step) {
                 0 -> MotionEvent.ACTION_DOWN
-                4 -> MotionEvent.ACTION_CANCEL
+                4 -> if (fling) MotionEvent.ACTION_UP else MotionEvent.ACTION_CANCEL
                 else -> MotionEvent.ACTION_MOVE
             }
-            val event = MotionEvent.obtain(time, time + step * 20, action,
-                view.width / 2f, start + (end - start) * step / 4, 0)
-            try {
-                view.dispatchTouchEvent(event)
-            } finally {
-                event.recycle()
-            }
+            pageTouch(view, time, time + step * 20, action, start + (end - start) * step / 4)
+        }
+    }
+
+    private fun pageTouch(view: View, downTime: Long, eventTime: Long, action: Int, y: Float) {
+        val event = MotionEvent.obtain(downTime, eventTime, action, view.width / 2f, y, 0)
+        try {
+            view.dispatchTouchEvent(event)
+        } finally {
+            event.recycle()
         }
     }
 
@@ -290,6 +418,13 @@ class ReaderFlowTest {
         return controls.all {
             it.visibility == visibility && it.alpha == if (visibility == View.VISIBLE) 1f else 0f
         }
+    }
+
+    private fun MainActivity.onlyScrollFlagIsVisible(): Boolean {
+        val flag = views().filterIsInstance<PageFlag>().single()
+        return findViewById<View>(R.id.tab_bar).visibility == View.INVISIBLE &&
+            findViewById<View>(R.id.reader_top_bar).visibility == View.INVISIBLE &&
+            flag.visibility == View.VISIBLE && flag.alpha == 1f
     }
 
     private fun awaitPage(page: Int, count: Int) {

@@ -21,7 +21,9 @@ class ReaderView(
     onRetry: () -> Unit,
 ) : FrameLayout(context) {
     private val engine = PdfEngine()
-    private val viewport = PdfViewport(context, engine, ::updatePosition, onScrollDirection, onPageTap)
+    private val viewport = PdfViewport(
+        context, engine, ::updatePosition, ::onViewportScrollChanged, onScrollDirection, onPageTap,
+    )
     private val topBar = context.label(tab.document.title, 16f, true).apply {
         id = R.id.reader_top_bar
         maxLines = 1
@@ -31,6 +33,11 @@ class ReaderView(
         setOnClickListener { onPageTap() }
     }
     private var barsVisible = true
+    private var viewportScrolling = false
+    private var flagVisible = true
+    private val hideFlag = Runnable {
+        if (!barsVisible && !viewportScrolling) setFlagVisible(false, animate = true)
+    }
     private val flag = PageFlag(context, viewport::scrollToProgress, ::jumpTo, ::showJumpDialog, onControlsInteraction)
     private var pageCount = 0
     private var pageIndex = -1
@@ -65,7 +72,7 @@ class ReaderView(
                     pageCount = sizes.size
                     flag.pageCount = pageCount
                     ready = true
-                    setFlagVisible(barsVisible, animate = false)
+                    setFlagVisible(flagVisible, animate = false)
                     errorPanel.visibility = GONE
                     viewport.setDocument(sizes, tab.pageIndex)
                 },
@@ -86,7 +93,8 @@ class ReaderView(
 
     fun setBarsVisible(visible: Boolean, animate: Boolean) {
         barsVisible = visible
-        setFlagVisible(visible, animate)
+        removeCallbacks(hideFlag)
+        setFlagVisible(visible || viewportScrolling, animate)
         topBar.animate().cancel()
         if (visible) topBar.visibility = VISIBLE
         val offset = if (visible) 0f else -context.dp(48).toFloat()
@@ -100,14 +108,26 @@ class ReaderView(
         }
     }
 
+    private fun onViewportScrollChanged(active: Boolean) {
+        viewportScrolling = active
+        removeCallbacks(hideFlag)
+        if (active) {
+            setFlagVisible(true, animate = true)
+        } else if (!barsVisible) {
+            postDelayed(hideFlag, 2000)
+        }
+    }
+
     private fun setFlagVisible(visible: Boolean, animate: Boolean) {
+        if (animate && flagVisible == visible) return
+        flagVisible = visible
         flag.animate().cancel()
         val show = visible && ready
         if (show) flag.visibility = VISIBLE
         val offset = if (show) 0f else context.dp(56).toFloat()
         if (animate && ready) {
             flag.animate().translationX(offset).alpha(if (show) 1f else 0f).setDuration(180)
-                .withEndAction { if (!barsVisible) flag.visibility = INVISIBLE }.start()
+                .withEndAction { if (!flagVisible) flag.visibility = INVISIBLE }.start()
         } else {
             flag.translationX = offset
             flag.alpha = if (show) 1f else 0f
@@ -156,6 +176,7 @@ class ReaderView(
     }
 
     fun dispose() {
+        removeCallbacks(hideFlag)
         topBar.animate().cancel()
         flag.animate().cancel()
         viewport.dispose()

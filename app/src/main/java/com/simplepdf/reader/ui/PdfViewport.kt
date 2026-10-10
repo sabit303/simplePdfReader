@@ -17,7 +17,6 @@ import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.OverScroller
 import com.simplepdf.reader.R
-import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -25,6 +24,7 @@ internal class PdfViewport(
     context: Context,
     private val engine: PdfEngine,
     private val onPosition: (Int, Float) -> Unit,
+    private val onScrollStateChanged: (Boolean) -> Unit,
     private val onScrollDirection: (Boolean) -> Unit,
     private val onTap: () -> Unit,
 ) : View(context) {
@@ -41,8 +41,9 @@ internal class PdfViewport(
     private var pendingRequest = false
     private var pinching = false
     private var multiplePointers = false
-    private var dragDistance = 0f
-    private var lastDirection: Boolean? = null
+    private var dragging = false
+    private var scrolling = false
+    private var scrollingDown: Boolean? = null
     private var announcedPage = -1
     private val failedPages = mutableSetOf<Int>()
     private val cache = object : LruCache<Int, Bitmap>(
@@ -78,25 +79,15 @@ internal class PdfViewport(
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(event: MotionEvent): Boolean {
             stopMotion()
-            dragDistance = 0f
-            lastDirection = null
             return true
         }
 
         override fun onScroll(first: MotionEvent?, current: MotionEvent, dx: Float, dy: Float): Boolean {
-            if (multiplePointers || scaleDetector.isInProgress) return true
-            val oldY = transform.y
+            if (multiplePointers || scaleDetector.isInProgress || geometry == null) return true
+            dragging = true
+            updateScrollState()
             transform.moveTo(transform.x + dx, transform.y + dy)
-            val moved = transform.y - oldY
-            dragDistance = if ((dragDistance > 0) == (moved > 0)) dragDistance + moved else moved
-            if (abs(dragDistance) > context.dp(12)) {
-                val down = dragDistance > 0
-                if (lastDirection != down) {
-                    onScrollDirection(down)
-                    lastDirection = down
-                }
-                dragDistance = 0f
-            }
+            reportScrollDirection(dy)
             positionChanged()
             return true
         }
@@ -108,6 +99,7 @@ internal class PdfViewport(
                 -vx.roundToInt(), -vy.roundToInt(),
                 0, transform.maxX.toInt(), 0, transform.maxY.toInt(),
             )
+            updateScrollState()
             postInvalidateOnAnimation()
             return true
         }
@@ -191,6 +183,9 @@ internal class PdfViewport(
         scaleDetector.onTouchEvent(event)
         gestures.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            dragging = false
+            if (event.actionMasked == MotionEvent.ACTION_CANCEL) scroller.forceFinished(true)
+            updateScrollState()
             pinching = false
             parent.requestDisallowInterceptTouchEvent(false)
             scheduleRender()
@@ -208,12 +203,17 @@ internal class PdfViewport(
 
     override fun computeScroll() {
         if (scroller.computeScrollOffset()) {
+            val previousY = transform.y
             transform.moveTo(scroller.currX.toFloat(), scroller.currY.toFloat())
+            val dy = transform.y - previousY
+            reportScrollDirection(dy)
+            if (dy < 0f && transform.y == 0f) onScrollDirection(false)
             positionChanged()
             postInvalidateOnAnimation()
         } else {
             scheduleRender()
         }
+        updateScrollState()
     }
 
     fun jumpTo(index: Int) {
@@ -245,8 +245,27 @@ internal class PdfViewport(
 
     private fun stopMotion() {
         scroller.forceFinished(true)
+        dragging = false
+        scrollingDown = null
         zoomAnimation?.cancel()
         zoomAnimation = null
+        updateScrollState()
+    }
+
+    private fun reportScrollDirection(dy: Float) {
+        if (dy == 0f) return
+        val down = dy > 0f
+        if (scrollingDown != down) {
+            scrollingDown = down
+            onScrollDirection(down)
+        }
+    }
+
+    private fun updateScrollState() {
+        val active = dragging || !scroller.isFinished
+        if (scrolling == active) return
+        scrolling = active
+        if (!disposed) onScrollStateChanged(active)
     }
 
     private fun positionChanged() {
@@ -333,8 +352,13 @@ internal class PdfViewport(
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> {
                 stopMotion()
                 val direction = if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) 1 else -1
+                dragging = true
+                updateScrollState()
                 transform.moveTo(transform.x, transform.y + height * 0.8f * direction)
+                reportScrollDirection(direction.toFloat())
                 positionChanged()
+                dragging = false
+                updateScrollState()
             }
             R.id.zoom_in -> animateZoom((transform.scale * 1.5f).coerceAtMost(5f), width / 2f, height / 2f)
             R.id.zoom_out -> animateZoom((transform.scale / 1.5f).coerceAtLeast(1f), width / 2f, height / 2f)

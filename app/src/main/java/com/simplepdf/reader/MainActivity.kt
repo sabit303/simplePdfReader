@@ -18,6 +18,7 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -100,7 +101,15 @@ class MainActivity : Activity() {
         root.addView(content, FrameLayout.LayoutParams(-1, -1))
         home = HomeView(this, ::openPicker, ::refreshLibrary, ::requestStorageAccess, ::openDocument)
         home.restoreState(savedInstanceState)
-        tabBar = LinearLayout(this).apply {
+        tabBar = object : LinearLayout(this) {
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> onControlsInteraction(true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onControlsInteraction(false)
+                }
+                return super.dispatchTouchEvent(event)
+            }
+        }.apply {
             id = R.id.tab_bar
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -411,8 +420,6 @@ class MainActivity : Activity() {
                 if (scrollingDown) {
                     main.removeCallbacks(hideTabs)
                     setTabsVisible(false)
-                } else {
-                    showTabsTemporarily()
                 }
             }, ::toggleReaderControls, ::onControlsInteraction, ::retrySelectedTab)
             reader?.setSideInsets(leftContentInset, rightContentInset)
@@ -444,6 +451,7 @@ class MainActivity : Activity() {
         val strip = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         val scroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            setOnScrollChangeListener { _, _, _, _, _ -> extendTabsVisibility() }
             addView(strip)
         }
         tabBar.addView(scroller, LinearLayout.LayoutParams(0, -1, 1f))
@@ -478,6 +486,12 @@ class MainActivity : Activity() {
         main.removeCallbacks(hideTabs)
         setTabsVisible(true)
         if (session.selectedPath != null) main.postDelayed(hideTabs, 3500)
+    }
+
+    private fun extendTabsVisibility() {
+        if (!tabsVisible || session.selectedPath == null) return
+        main.removeCallbacks(hideTabs)
+        main.postDelayed(hideTabs, 3500)
     }
 
     private fun toggleReaderControls() {

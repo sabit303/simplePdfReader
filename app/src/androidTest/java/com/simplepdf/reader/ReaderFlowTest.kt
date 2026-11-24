@@ -333,19 +333,19 @@ class ReaderFlowTest {
     }
 
     @Test
-    fun scrollingUpRestoresBarsAndScrollingDownShowsOnlyFlag() {
+    fun scrollingUpKeepsBarsHiddenWhileScrollingDownShowsOnlyFlag() {
         launch()
         awaitPage(1, 3)
         onActivity { it.views().filterIsInstance<PdfViewport>().single().performClick() }
         awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
         onActivity { activity ->
-            swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true)
-        }
-        awaitCondition { it.onlyScrollFlagIsVisible() }
-        onActivity { activity ->
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false)
         }
-        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity {
+            assertEquals(View.INVISIBLE, it.findViewById<View>(R.id.tab_bar).visibility)
+            assertEquals(View.INVISIBLE, it.findViewById<View>(R.id.reader_top_bar).visibility)
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
         onActivity { activity ->
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = true)
         }
@@ -354,7 +354,7 @@ class ReaderFlowTest {
     }
 
     @Test
-    fun upwardSwipeAtTopRestoresHiddenBars() {
+    fun upwardSwipeAtTopKeepsBarsHidden() {
         launch()
         awaitPage(1, 3)
         onActivity { activity ->
@@ -365,14 +365,16 @@ class ReaderFlowTest {
         onActivity { activity ->
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false)
         }
-        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
         onActivity {
             assertEquals(0f, it.views().filterIsInstance<PdfViewport>().single().scrollPosition, 0.01f)
+            assertEquals(View.INVISIBLE, it.findViewById<View>(R.id.tab_bar).visibility)
+            assertEquals(View.INVISIBLE, it.findViewById<View>(R.id.reader_top_bar).visibility)
         }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
     @Test
-    fun reversingDirectionDuringOneDragRestoresBars() {
+    fun reversingDirectionDuringOneDragKeepsBarsHidden() {
         launch()
         awaitPage(1, 3)
         val downTime = SystemClock.uptimeMillis()
@@ -388,7 +390,11 @@ class ReaderFlowTest {
             pageTouch(viewport, downTime, time, MotionEvent.ACTION_MOVE, viewport.height * 0.6f)
             pageTouch(viewport, downTime, time + 20, MotionEvent.ACTION_CANCEL, viewport.height * 0.6f)
         }
-        awaitCondition { it.controlsHaveVisibility(View.VISIBLE) }
+        onActivity {
+            assertEquals(View.INVISIBLE, it.findViewById<View>(R.id.tab_bar).visibility)
+            assertEquals(View.INVISIBLE, it.findViewById<View>(R.id.reader_top_bar).visibility)
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
     @Test
@@ -409,7 +415,7 @@ class ReaderFlowTest {
     }
 
     @Test
-    fun upwardFlingToTopRestoresBars() {
+    fun upwardFlingToTopKeepsBarsHidden() {
         launch()
         awaitPage(1, 3)
         onActivity { activity ->
@@ -422,9 +428,9 @@ class ReaderFlowTest {
             swipe(activity.views().filterIsInstance<PdfViewport>().single(), down = false, fling = true)
         }
         awaitCondition {
-            it.controlsHaveVisibility(View.VISIBLE) &&
-                it.views().filterIsInstance<PdfViewport>().single().scrollPosition == 0f
+            it.views().filterIsInstance<PdfViewport>().single().scrollPosition == 0f
         }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
     }
 
     @Test
@@ -525,6 +531,36 @@ class ReaderFlowTest {
                 flag.width / 2f, flag.height / 2f, 0)
             try {
                 flag.dispatchTouchEvent(event)
+            } finally {
+                event.recycle()
+            }
+        }
+        awaitCondition { it.controlsHaveVisibility(View.INVISIBLE) }
+    }
+
+    @Test
+    fun dockTouchPausesAutoHideUntilReleased() {
+        launch()
+        awaitPage(1, 3)
+        val downTime = SystemClock.uptimeMillis()
+        onActivity { activity ->
+            val dock = activity.findViewById<View>(R.id.tab_bar)
+            val event = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN,
+                dock.width / 2f, dock.height / 2f, 0)
+            try {
+                dock.dispatchTouchEvent(event)
+            } finally {
+                event.recycle()
+            }
+        }
+        Thread.sleep(4000)
+        onActivity { assertTrue(it.controlsHaveVisibility(View.VISIBLE)) }
+        onActivity { activity ->
+            val dock = activity.findViewById<View>(R.id.tab_bar)
+            val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL,
+                dock.width / 2f, dock.height / 2f, 0)
+            try {
+                dock.dispatchTouchEvent(event)
             } finally {
                 event.recycle()
             }

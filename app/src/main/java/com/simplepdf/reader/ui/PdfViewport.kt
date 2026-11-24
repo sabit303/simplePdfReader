@@ -194,7 +194,6 @@ internal class PdfViewport(
             transform.moveTo(scroller.currX.toFloat(), scroller.currY.toFloat())
             val dy = transform.y - previousY
             reportScrollDirection(dy)
-            if (dy < 0f && transform.y == 0f) onScrollDirection(false)
             positionChanged()
             postInvalidateOnAnimation()
         } else {

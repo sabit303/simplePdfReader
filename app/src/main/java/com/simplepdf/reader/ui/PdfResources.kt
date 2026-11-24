@@ -22,7 +22,7 @@ internal class PdfResources(
 ) {
     val cache = ByteLruCache<PdfPageKey, Bitmap>(cacheBytes) { it.allocationByteCount }
     private val documents = LinkedHashMap<String, PdfDocumentState>(16, 0.75f, true)
-    private var activePath: String? = null
+    private var activePaths: Set<String> = emptySet()
     private var closed = false
 
     init {
@@ -30,24 +30,33 @@ internal class PdfResources(
     }
 
     fun activate(tab: OpenPdfTab): PdfDocumentState {
+        return activateAll(listOf(tab)).single()
+    }
+
+    fun activateAll(tabs: List<OpenPdfTab>): List<PdfDocumentState> {
         check(!closed) { "Reader resources are closed." }
-        val path = tab.document.path
-        activePath = path
-        val document = documents.getOrPut(path) {
-            PdfDocumentState(path, PdfReadingPosition(tab.pageIndex), cache) { createBackend(worker) }
+        require(tabs.map { it.document.path }.distinct().size == tabs.size)
+        activePaths = tabs.mapTo(linkedSetOf()) { it.document.path }
+        return tabs.map { tab ->
+            val path = tab.document.path
+            val document = documents.getOrPut(path) {
+                PdfDocumentState(path, PdfReadingPosition(tab.pageIndex), cache) { createBackend(worker) }
+            }
+            document.checkSource()
+            if (!document.isOpen) {
+                val retained = documents.values.filter {
+                    it.isOpen && it !== document && it.path !in activePaths
+                }
+                retained.take((documents.values.count { it.isOpen } - maxOpenDocuments + 1).coerceAtLeast(0))
+                    .forEach { it.release() }
+                document.load()
+            }
+            document
         }
-        document.checkSource()
-        if (!document.isOpen) {
-            val retained = documents.values.filter { it.isOpen && it !== document }
-            retained.take((retained.size - maxOpenDocuments + 1).coerceAtLeast(0))
-                .forEach { it.release() }
-            document.load()
-        }
-        return document
     }
 
     fun showHome() {
-        activePath = null
+        activePaths = emptySet()
     }
 
     fun invalidate(path: String) {
@@ -60,11 +69,11 @@ internal class PdfResources(
 
     fun closeTab(path: String) {
         documents.remove(path)?.release()
-        if (activePath == path) activePath = null
+        activePaths = activePaths - path
     }
 
     fun trimMemory() {
-        documents.values.filter { it.path != activePath }.forEach { it.release() }
+        documents.values.filter { it.path !in activePaths }.forEach { it.release() }
         cache.trimToSize(cache.maxBytes / 2)
     }
 

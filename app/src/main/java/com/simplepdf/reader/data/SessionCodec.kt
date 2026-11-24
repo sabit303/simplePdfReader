@@ -6,7 +6,7 @@ import org.json.JSONObject
 import org.json.JSONTokener
 
 object SessionCodec {
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     fun encode(session: ReaderSession): String {
         val tabs = JSONArray()
@@ -22,10 +22,17 @@ object SessionCodec {
                     .put("pageIndex", tab.pageIndex),
             )
         }
+        val split = session.split?.let {
+            JSONObject()
+                .put("topPath", it.topPath)
+                .put("bottomPath", it.bottomPath)
+                .put("ratio", it.ratio.toDouble())
+        } ?: JSONObject.NULL
         return JSONObject()
             .put("version", VERSION)
             .put("tabs", tabs)
             .put("selectedPath", session.selectedPath ?: JSONObject.NULL)
+            .put("split", split)
             .toString()
     }
 
@@ -35,7 +42,8 @@ object SessionCodec {
             val root = tokener.nextValue() as? JSONObject
                 ?: throw IllegalArgumentException("A saved session must be a JSON object")
             require(tokener.nextClean() == '\u0000') { "Unexpected data after the saved session" }
-            require(root.requiredLong("version") == VERSION.toLong()) {
+            val version = root.requiredLong("version")
+            require(version == 1L || version == VERSION.toLong()) {
                 "Unsupported saved session version"
             }
             val savedTabs = root.get("tabs") as? JSONArray
@@ -64,7 +72,18 @@ object SessionCodec {
                 selected as? String
                     ?: throw IllegalArgumentException("The selected PDF path must be a string or null")
             }
-            return ReaderSession(tabs, selectedPath)
+            val split = if (version == 1L) null else {
+                when (val saved = root.get("split")) {
+                    JSONObject.NULL -> null
+                    is JSONObject -> ReaderSplit(
+                        topPath = saved.requiredString("topPath"),
+                        bottomPath = saved.requiredString("bottomPath"),
+                        ratio = saved.requiredDouble("ratio").toFloat(),
+                    )
+                    else -> throw IllegalArgumentException("The saved split must be an object or null")
+                }
+            }
+            return ReaderSession(tabs, selectedPath, split)
         } catch (exception: JSONException) {
             throw IllegalArgumentException("Malformed saved reader session", exception)
         }
@@ -77,5 +96,11 @@ object SessionCodec {
         val value = get(key)
         require(value is Int || value is Long) { "$key must be a 64-bit integer" }
         return (value as Number).toLong()
+    }
+
+    private fun JSONObject.requiredDouble(key: String): Double {
+        val value = get(key)
+        require(value is Number) { "$key must be a number" }
+        return (value as Number).toDouble().also { require(it.isFinite()) { "$key must be finite" } }
     }
 }

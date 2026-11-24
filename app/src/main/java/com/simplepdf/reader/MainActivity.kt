@@ -4,9 +4,11 @@ import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.content.ComponentCallbacks2
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -18,6 +20,7 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
+import android.view.DragEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
@@ -38,6 +41,8 @@ import com.simplepdf.reader.ui.HomeView
 import com.simplepdf.reader.ui.Palette
 import com.simplepdf.reader.ui.PdfResources
 import com.simplepdf.reader.ui.ReaderView
+import com.simplepdf.reader.ui.SplitDropOverlay
+import com.simplepdf.reader.ui.SplitReaderLayout
 import com.simplepdf.reader.ui.action
 import com.simplepdf.reader.ui.dp
 import com.simplepdf.reader.ui.label
@@ -58,7 +63,8 @@ class MainActivity : Activity() {
     private lateinit var content: FrameLayout
     private lateinit var home: HomeView
     private lateinit var tabBar: LinearLayout
-    private var reader: ReaderView? = null
+    private var readers: List<ReaderView> = emptyList()
+    private lateinit var dropOverlay: SplitDropOverlay
     internal lateinit var pdfResources: PdfResources
         private set
     internal lateinit var libraryState: LibraryState
@@ -97,7 +103,10 @@ class MainActivity : Activity() {
             ReaderSession()
         }
         root = FrameLayout(this).apply { setBackgroundColor(Palette.background) }
-        content = FrameLayout(this)
+        dropOverlay = SplitDropOverlay(this)
+        content = FrameLayout(this).apply {
+            setOnDragListener { view, event -> onTabDragEvent(view, event) }
+        }
         root.addView(content, FrameLayout.LayoutParams(-1, -1))
         home = HomeView(this, ::openPicker, ::refreshLibrary, ::requestStorageAccess, ::openDocument)
         home.restoreState(savedInstanceState)
@@ -114,7 +123,9 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             elevation = dp(12).toFloat()
-            background = rounded(Color.WHITE, dp(20).toFloat())
+            background = rounded(Color.WHITE, dp(20).toFloat()).apply {
+                setStroke(dp(1).coerceAtLeast(1), Palette.green)
+            }
             setPadding(dp(6), dp(6), dp(6), dp(6))
         }
         root.addView(tabBar, FrameLayout.LayoutParams(
@@ -176,7 +187,7 @@ class MainActivity : Activity() {
         leftContentInset = (cutoutLeft - left).coerceAtLeast(0)
         rightContentInset = (cutoutRight - right).coerceAtLeast(0)
         home.setPadding(leftContentInset, 0, rightContentInset, 0)
-        reader?.setSideInsets(leftContentInset, rightContentInset)
+        readers.forEach { it.setSideInsets(leftContentInset, rightContentInset) }
         (tabBar.layoutParams as FrameLayout.LayoutParams).apply {
             leftMargin = leftContentInset
             rightMargin = rightContentInset
@@ -190,7 +201,7 @@ class MainActivity : Activity() {
         val access = hasStorageAccess()
         if (::home.isInitialized && access != previousAccess) {
             previousAccess = access
-            detachReader()
+            detachReaders()
             pdfResources.invalidateAll()
             refreshLibrary()
             if (session.selectedPath != null) showSelectedTab()
@@ -207,7 +218,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         libraryState.removeObserver(libraryObserver)
-        detachReader()
+        detachReaders()
         if (!isChangingConfigurations) {
             pdfResources.close()
             libraryState.close()
@@ -253,7 +264,15 @@ class MainActivity : Activity() {
 
     @Deprecated("Framework back handling for the supported Android versions")
     override fun onBackPressed() {
-        if (session.selectedPath != null) selectTab(null) else super.onBackPressed()
+        when {
+            session.split != null -> {
+                session = session.clearSplit()
+                saveSession()
+                showSelectedTab()
+            }
+            session.selectedPath != null -> selectTab(null)
+            else -> super.onBackPressed()
+        }
     }
 
     private fun hasStorageAccess(): Boolean = if (Build.VERSION.SDK_INT >= 30) {
@@ -283,7 +302,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == STORAGE_REQUEST) {
             previousAccess = hasStorageAccess()
-            detachReader()
+            detachReaders()
             pdfResources.invalidateAll()
             refreshLibrary()
             if (!previousAccess) Toast.makeText(this, R.string.access_denied, Toast.LENGTH_LONG).show()
@@ -354,7 +373,7 @@ class MainActivity : Activity() {
                 val document = importer.import(uri)
                 main.post {
                     if (!isDestroyed) {
-                        if (reader?.tab?.document?.path == document.path) detachReader()
+                        if (readers.any { it.tab.document.path == document.path }) detachReaders()
                         pdfResources.invalidate(document.path)
                         openDocument(document)
                         refreshLibrary()
@@ -383,7 +402,7 @@ class MainActivity : Activity() {
     }
 
     private fun selectTab(path: String?) {
-        if (session.selectedPath == path) {
+        if (session.selectedPath == path && session.split == null) {
             showTabsTemporarily()
             return
         }
@@ -393,51 +412,89 @@ class MainActivity : Activity() {
     }
 
     private fun closeTab(path: String) {
-        val wasSelected = session.selectedPath == path
-        if (wasSelected) detachReader()
+        val wasVisible = session.selectedPath == path || session.split?.contains(path) == true
+        if (wasVisible) detachReaders()
         pdfResources.closeTab(path)
         session = session.close(path)
         saveSession()
-        if (wasSelected) showSelectedTab() else rebuildTabs()
+        if (wasVisible) showSelectedTab() else rebuildTabs()
     }
 
     private fun showSelectedTab() {
         main.removeCallbacks(hideTabs)
-        detachReader()
+        detachReaders()
         content.removeAllViews()
         val selected = session.tabs.firstOrNull { it.document.path == session.selectedPath }
         if (selected == null) {
             pdfResources.showHome()
             content.addView(home, FrameLayout.LayoutParams(-1, -1))
         } else {
-            reader = ReaderView(this, selected, pdfResources.activate(selected), { page ->
-                if (session.tabs.any { it.document.path == selected.document.path }) {
-                    session = session.updatePage(selected.document.path, page)
-                    main.removeCallbacks(persist)
-                    if (stopped) saveSession() else main.postDelayed(persist, 200)
-                }
-            }, { scrollingDown ->
-                if (scrollingDown) {
-                    main.removeCallbacks(hideTabs)
-                    setTabsVisible(false)
-                }
-            }, ::toggleReaderControls, ::onControlsInteraction, ::retrySelectedTab)
-            reader?.setSideInsets(leftContentInset, rightContentInset)
-            content.addView(reader, FrameLayout.LayoutParams(-1, -1))
+            val split = session.split
+            if (split == null) {
+                val reader = createReader(selected, pdfResources.activate(selected))
+                readers = listOf(reader)
+                content.addView(reader, FrameLayout.LayoutParams(-1, -1))
+                dropOverlay.visibility = View.GONE
+                content.addView(dropOverlay, FrameLayout.LayoutParams(-1, -1))
+            } else {
+                val top = session.tabs.first { it.document.path == split.topPath }
+                val bottom = session.tabs.first { it.document.path == split.bottomPath }
+                val states = pdfResources.activateAll(listOf(top, bottom))
+                val topReader = createReader(top, states[0]) { collapseSplit(top.document.path) }
+                val bottomReader = createReader(bottom, states[1]) { collapseSplit(bottom.document.path) }
+                readers = listOf(topReader, bottomReader)
+                content.addView(SplitReaderLayout(
+                    this, topReader, bottomReader, split.ratio,
+                    onRatioChanged = { ratio ->
+                        if (session.split != null) session = session.updateSplitRatio(ratio)
+                    },
+                    onRatioCommitted = { saveSession() },
+                    onCollapseTop = { collapseSplit(top.document.path) },
+                    onCollapseBottom = { collapseSplit(bottom.document.path) },
+                ), FrameLayout.LayoutParams(-1, -1))
+            }
         }
         rebuildTabs()
         setTabsVisible(true, animate = false)
         if (selected != null) main.postDelayed(hideTabs, 3500)
     }
 
-    private fun detachReader() {
-        reader?.dispose()
-        reader = null
+    private fun createReader(
+        tab: com.simplepdf.reader.data.OpenPdfTab,
+        state: com.simplepdf.reader.ui.PdfDocumentState,
+        onExitSplit: (() -> Unit)? = null,
+    ): ReaderView {
+        return ReaderView(this, tab, state, { page ->
+            if (session.tabs.any { it.document.path == tab.document.path }) {
+                session = session.updatePage(tab.document.path, page)
+                main.removeCallbacks(persist)
+                if (stopped) saveSession() else main.postDelayed(persist, 200)
+            }
+        }, { scrollingDown ->
+            if (scrollingDown) {
+                main.removeCallbacks(hideTabs)
+                setTabsVisible(false)
+            }
+        }, ::toggleReaderControls, ::onControlsInteraction, { retryTab(tab.document.path) }, onExitSplit).also {
+            it.setSideInsets(leftContentInset, rightContentInset)
+        }
     }
 
-    private fun retrySelectedTab() {
-        detachReader()
-        session.selectedPath?.let(pdfResources::invalidate)
+    private fun detachReaders() {
+        readers.forEach(ReaderView::dispose)
+        readers = emptyList()
+    }
+
+    private fun retryTab(path: String) {
+        detachReaders()
+        pdfResources.invalidate(path)
+        showSelectedTab()
+    }
+
+    private fun collapseSplit(path: String) {
+        if (session.split?.contains(path) != true) return
+        session = session.collapseSplit(path)
+        saveSession()
         showSelectedTab()
     }
 
@@ -456,19 +513,20 @@ class MainActivity : Activity() {
         }
         tabBar.addView(scroller, LinearLayout.LayoutParams(0, -1, 1f))
         for (tab in session.tabs) {
-            val active = tab.document.path == session.selectedPath
+            val active = tab.document.path == session.selectedPath || session.split?.contains(tab.document.path) == true
             val cell = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 background = rounded(if (active) Palette.softGreen else Palette.background, dp(14).toFloat())
             }
-            cell.addView(label(tab.document.title, 13f, active).apply {
+            val title = label(tab.document.title, 13f, active).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(dp(12), 0, 0, 0)
                 isFocusable = true
                 isSelected = active
                 setOnClickListener { selectTab(tab.document.path) }
-            }, LinearLayout.LayoutParams(0, -1, 1f))
+            }
+            cell.addView(title, LinearLayout.LayoutParams(0, -1, 1f))
             cell.addView(action("\u00d7") { closeTab(tab.document.path) }.apply {
                 contentDescription = getString(R.string.close_tab, tab.document.title)
                 textSize = 24f
@@ -478,9 +536,58 @@ class MainActivity : Activity() {
             strip.addView(cell, LinearLayout.LayoutParams(dp(144), dp(48)).apply {
                 marginStart = dp(6)
             })
+            if (session.selectedPath != null && session.split == null && !active) {
+                val beginDrag = View.OnLongClickListener { startTabDrag(tab.document.path, cell) }
+                cell.setOnLongClickListener(beginDrag)
+                title.setOnLongClickListener(beginDrag)
+            }
             if (active) scroller.post { scroller.smoothScrollTo(cell.left - dp(8), 0) }
         }
     }
+
+    private fun startTabDrag(path: String, source: View): Boolean {
+        if (session.selectedPath == null || session.split != null || path == session.selectedPath) return false
+        return source.startDragAndDrop(
+            ClipData.newPlainText("PDF tab", path),
+            View.DragShadowBuilder(source),
+            TabDrag(path),
+            0,
+        )
+    }
+
+    private fun onTabDragEvent(view: View, event: DragEvent): Boolean {
+        val drag = event.localState as? TabDrag ?: return false
+        val canSplit = session.selectedPath != null && session.split == null &&
+            drag.path != session.selectedPath && session.tabs.any { it.document.path == drag.path }
+        when (event.action) {
+            DragEvent.ACTION_DRAG_STARTED -> {
+                if (!canSplit || dropOverlay.parent !== content) return false
+                dropOverlay.dropOnTop = true
+                dropOverlay.visibility = View.VISIBLE
+                dropOverlay.bringToFront()
+            }
+            DragEvent.ACTION_DRAG_LOCATION -> {
+                if (!canSplit) return false
+                dropOverlay.dropOnTop = dropInFirstHalf(view, event)
+            }
+            DragEvent.ACTION_DROP -> {
+                dropOverlay.visibility = View.GONE
+                if (!canSplit) return false
+                session = session.splitWith(drag.path, dropInFirstHalf(view, event))
+                saveSession()
+                showSelectedTab()
+            }
+            DragEvent.ACTION_DRAG_ENDED -> dropOverlay.visibility = View.GONE
+        }
+        return canSplit
+    }
+
+    private fun dropInFirstHalf(view: View, event: DragEvent): Boolean =
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            event.x < view.width / 2f
+        } else {
+            event.y < view.height / 2f
+        }
 
     private fun showTabsTemporarily() {
         main.removeCallbacks(hideTabs)
@@ -517,7 +624,7 @@ class MainActivity : Activity() {
         val show = visible || session.selectedPath == null || accessibility.isTouchExplorationEnabled
         if (animate && tabsVisible == show) return
         tabsVisible = show
-        reader?.setBarsVisible(show, animate)
+        readers.forEach { it.setBarsVisible(show, animate) }
         tabBar.animate().cancel()
         if (show) tabBar.visibility = View.VISIBLE
         val offset = if (show) 0f else dp(100).toFloat()
@@ -578,4 +685,5 @@ class MainActivity : Activity() {
     }
 
     private data class RetainedState(val pdfs: PdfResources, val library: LibraryState)
+    private data class TabDrag(val path: String)
 }

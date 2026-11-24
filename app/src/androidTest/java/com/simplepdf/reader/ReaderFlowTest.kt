@@ -31,6 +31,7 @@ import com.simplepdf.reader.ui.PdfReadingPosition
 import com.simplepdf.reader.ui.PdfResources
 import com.simplepdf.reader.ui.PdfViewport
 import com.simplepdf.reader.ui.ReaderView
+import com.simplepdf.reader.ui.SplitReaderLayout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -603,6 +604,44 @@ class ReaderFlowTest {
                 .performAccessibilityAction(R.id.zoom_out, null)
         }
         awaitCondition { it.views().filterIsInstance<PdfViewport>().single().zoom == 1f }
+    }
+
+    @Test
+    fun restoredSplitResizesAndEitherPaneCanBeCollapsed() {
+        SessionStore(context).save(
+            ReaderSession().open(first).open(second).splitWith(first.path, droppedOnTop = true),
+        )
+        launch()
+        awaitCondition { it.views().filterIsInstance<ReaderView>().size == 2 }
+
+        var originalTopHeight = 0
+        onActivity { activity ->
+            val split = activity.views().filterIsInstance<SplitReaderLayout>().single()
+            assertEquals(first.path, split.topReader.tab.document.path)
+            assertEquals(second.path, split.bottomReader.tab.document.path)
+            originalTopHeight = split.topReader.height
+            activity.findViewById<View>(R.id.split_divider).performAccessibilityAction(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD,
+                null,
+            )
+        }
+        awaitCondition {
+            it.views().filterIsInstance<SplitReaderLayout>().single().topReader.height > originalTopHeight
+        }
+
+        onActivity { activity ->
+            activity.views().first {
+                it.contentDescription == context.getString(R.string.remove_split_pane, first.title)
+            }.performClick()
+        }
+        awaitCondition { it.views().filterIsInstance<ReaderView>().size == 1 }
+        onActivity { activity ->
+            assertEquals(second.path, activity.views().filterIsInstance<ReaderView>().single().tab.document.path)
+        }
+        awaitCondition {
+            val saved = SessionStore(context).load()
+            saved.split == null && saved.selectedPath == second.path && saved.tabs.size == 2
+        }
     }
 
     private fun launch() {

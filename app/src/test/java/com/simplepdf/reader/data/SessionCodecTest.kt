@@ -21,17 +21,28 @@ class SessionCodecTest {
         assertEquals(ReaderSession(), SessionCodec.decode(SessionCodec.encode(ReaderSession())))
         val historicalDocument = ReaderSession().open(first.copy(modifiedAt = -1000))
         assertEquals(historicalDocument, SessionCodec.decode(SessionCodec.encode(historicalDocument)))
+        val split = session.splitWith(first.path, droppedOnTop = true).updateSplitRatio(0.63f)
+        assertEquals(split, SessionCodec.decode(SessionCodec.encode(split)))
     }
 
     @Test
     fun encodedFormatHasAnExplicitVersion() {
         val encoded = JSONObject(SessionCodec.encode(session))
-        assertEquals(1, encoded.getInt("version"))
+        assertEquals(2, encoded.getInt("version"))
+    }
+
+    @Test
+    fun versionOneSessionsRemainReadable() {
+        val encoded = JSONObject(SessionCodec.encode(session)).apply {
+            put("version", 1)
+            remove("split")
+        }
+        assertEquals(session, SessionCodec.decode(encoded.toString()))
     }
 
     @Test
     fun unsupportedAndMissingVersionsAreRejected() {
-        for (version in listOf(-1, 0, 2, "1", JSONObject.NULL)) {
+        for (version in listOf(-1, 0, 3, "1", JSONObject.NULL)) {
             rejects { put("version", version) }
         }
         rejects { remove("version") }
@@ -54,6 +65,8 @@ class SessionCodecTest {
         rejects { put("tabs", JSONObject()) }
         rejects { remove("selectedPath") }
         rejects { put("selectedPath", false) }
+        rejects { remove("split") }
+        rejects { put("split", false) }
         rejects { put("tabs", JSONArray().put("not an object")) }
         rejects { getJSONArray("tabs").getJSONObject(0).remove("document") }
         rejects { getJSONArray("tabs").getJSONObject(0).put("document", "not an object") }
@@ -77,6 +90,18 @@ class SessionCodecTest {
         rejects { document().put("sizeBytes", -1) }
         rejects { put("selectedPath", "/missing.pdf") }
         rejects { getJSONArray("tabs").put(getJSONArray("tabs").getJSONObject(0)) }
+        rejects {
+            put("split", JSONObject()
+                .put("topPath", first.path)
+                .put("bottomPath", "/missing.pdf")
+                .put("ratio", 0.5))
+        }
+        rejects {
+            put("split", JSONObject()
+                .put("topPath", first.path)
+                .put("bottomPath", second.path)
+                .put("ratio", 1.0))
+        }
     }
 
     @Test

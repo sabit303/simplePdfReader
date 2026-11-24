@@ -5,4 +5,5 @@
     <item name="library_search" type="id" />
     <item name="zoom_in" type="id" />
     <item name="zoom_out" type="id" />
+    <item name="split_divider" type="id" />
 </resources>

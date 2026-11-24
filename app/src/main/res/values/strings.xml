@@ -43,4 +43,6 @@
     <string name="picker_unavailable">No document picker is available on this device.</string>
     <string name="save_error">Could not save tabs. Check available device storage.</string>
     <string name="untitled_pdf">Document.pdf</string>
+    <string name="resize_split">Resize split view</string>
+    <string name="remove_split_pane">Remove %1$s from split view</string>
 </resources>

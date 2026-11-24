@@ -2,6 +2,7 @@ package com.simplepdf.reader.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -74,6 +75,40 @@ class ReaderSessionTest {
     }
 
     @Test
+    fun splitOrderResizeAndCollapseAreTrackedWithoutClosingTabs() {
+        val all = ReaderSession().open(first).open(second).open(third).select(first.path)
+
+        val droppedOnTop = all.splitWith(third.path, droppedOnTop = true)
+        assertEquals(third.path, droppedOnTop.split?.topPath)
+        assertEquals(first.path, droppedOnTop.split?.bottomPath)
+        assertEquals(0.7f, droppedOnTop.updateSplitRatio(0.7f).split?.ratio)
+
+        val collapsedTop = droppedOnTop.collapseSplit(third.path)
+        assertNull(collapsedTop.split)
+        assertEquals(first.path, collapsedTop.selectedPath)
+        assertEquals(3, collapsedTop.tabs.size)
+
+        val droppedOnBottom = all.splitWith(second.path, droppedOnTop = false)
+        assertEquals(first.path, droppedOnBottom.split?.topPath)
+        assertEquals(second.path, droppedOnBottom.split?.bottomPath)
+        assertEquals(second.path, droppedOnBottom.collapseSplit(first.path).selectedPath)
+        assertNotNull(droppedOnBottom.split)
+    }
+
+    @Test
+    fun selectingOrClosingAVisibleTabEndsSplitMode() {
+        val split = ReaderSession().open(first).open(second).open(third)
+            .splitWith(first.path, droppedOnTop = true)
+
+        assertNull(split.select(first.path).split)
+        assertEquals(split.split, split.close(second.path).split)
+        val closed = split.close(first.path)
+        assertNull(closed.split)
+        assertEquals(third.path, closed.selectedPath)
+        assertEquals(listOf(second, third), closed.tabs.map { it.document })
+    }
+
+    @Test
     fun invalidPathsPagesAndSessionInvariantsAreRejected() {
         val session = ReaderSession().open(first)
         for (path in listOf("", " ", "/missing.pdf")) {
@@ -85,6 +120,11 @@ class ReaderSessionTest {
         assertThrows(IllegalArgumentException::class.java) { OpenPdfTab(first, -1) }
         assertThrows(IllegalArgumentException::class.java) { first.copy(path = " ") }
         assertThrows(IllegalArgumentException::class.java) { first.copy(sizeBytes = -1) }
+        assertThrows(IllegalArgumentException::class.java) { session.splitWith(first.path, true) }
+        assertThrows(IllegalArgumentException::class.java) { session.splitWith(second.path, true) }
+        assertThrows(IllegalArgumentException::class.java) { session.updateSplitRatio(0.5f) }
+        assertThrows(IllegalArgumentException::class.java) { ReaderSplit(first.path, second.path, 0f) }
+        assertThrows(IllegalArgumentException::class.java) { ReaderSplit(first.path, first.path) }
         assertThrows(IllegalArgumentException::class.java) {
             ReaderSession(listOf(OpenPdfTab(first), OpenPdfTab(first)))
         }

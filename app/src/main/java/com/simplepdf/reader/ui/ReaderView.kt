@@ -20,6 +20,7 @@ internal class ReaderView(
     private val onPageTap: () -> Unit,
     private val onControlsInteraction: (Boolean) -> Unit,
     onRetry: () -> Unit,
+    onExitSplit: (() -> Unit)? = null,
 ) : FrameLayout(context) {
     private val viewport = PdfViewport(
         context, document, ::updatePosition, ::onViewportScrollChanged, onScrollDirection, onPageTap,
@@ -30,9 +31,19 @@ internal class ReaderView(
         id = R.id.reader_top_bar
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.MIDDLE
-        setPadding(context.dp(20), 0, context.dp(20), 0)
+        setPadding(context.dp(if (onExitSplit == null) 20 else 56), 0, context.dp(20), 0)
         setBackgroundColor(Palette.background)
         setOnClickListener { onPageTap() }
+    }
+    private val exitSplit = onExitSplit?.let { exit ->
+        context.action("\u00d7", exit).apply {
+            contentDescription = context.getString(R.string.remove_split_pane, tab.document.title)
+            textSize = 24f
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(0, 0, 0, 0)
+            background = rounded(android.graphics.Color.TRANSPARENT)
+        }
     }
     private var barsVisible = true
     private var viewportScrolling = false
@@ -65,6 +76,7 @@ internal class ReaderView(
             bottomMargin = context.dp(80)
         })
         addView(topBar, LayoutParams(LayoutParams.MATCH_PARENT, context.dp(48), Gravity.TOP))
+        exitSplit?.let { addView(it, LayoutParams(context.dp(48), context.dp(48), Gravity.LEFT or Gravity.TOP)) }
         addView(flag, LayoutParams(context.dp(56), context.dp(48), Gravity.RIGHT or Gravity.TOP))
         addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> flag.updatePosition() }
         flag.visibility = GONE
@@ -104,20 +116,35 @@ internal class ReaderView(
         removeCallbacks(hideFlag)
         setFlagVisible(visible || viewportScrolling, animate)
         topBar.animate().cancel()
+        exitSplit?.animate()?.cancel()
         if (visible) topBar.visibility = VISIBLE
+        if (visible) exitSplit?.visibility = VISIBLE
         val offset = if (visible) 0f else -context.dp(48).toFloat()
         if (animate) {
             topBar.animate().translationY(offset).alpha(if (visible) 1f else 0f).setDuration(180)
                 .withEndAction { if (!barsVisible) topBar.visibility = INVISIBLE }.start()
+            exitSplit?.let { button ->
+                button.animate().translationY(offset).alpha(if (visible) 1f else 0f).setDuration(180)
+                    .withEndAction { if (!barsVisible) button.visibility = INVISIBLE }.start()
+            }
         } else {
             topBar.translationY = offset
             topBar.alpha = if (visible) 1f else 0f
             topBar.visibility = if (visible) VISIBLE else INVISIBLE
+            exitSplit?.translationY = offset
+            exitSplit?.alpha = if (visible) 1f else 0f
+            exitSplit?.visibility = if (visible) VISIBLE else INVISIBLE
         }
     }
 
     fun setSideInsets(left: Int, right: Int) {
-        topBar.setPadding(context.dp(20) + left, 0, context.dp(20) + right, 0)
+        topBar.setPadding(context.dp(if (exitSplit == null) 20 else 56) + left, 0, context.dp(20) + right, 0)
+        exitSplit?.let {
+            (it.layoutParams as LayoutParams).apply {
+                leftMargin = left
+                it.layoutParams = this
+            }
+        }
         (flag.layoutParams as LayoutParams).apply {
             rightMargin = right
             flag.layoutParams = this
@@ -199,6 +226,7 @@ internal class ReaderView(
         jumpDialog = null
         removeCallbacks(hideFlag)
         topBar.animate().cancel()
+        exitSplit?.animate()?.cancel()
         flag.animate().cancel()
         viewport.dispose()
     }
